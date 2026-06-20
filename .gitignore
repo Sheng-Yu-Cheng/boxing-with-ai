@@ -1,3 +1,6 @@
 .venv/
 *.bin
 *.task
+__pycache__/
+models/
+data/
