@@ -34,12 +34,14 @@ The vision subsystem performs:
 
 Recognized actions:
 
-- Jab
-- Cross
+- Left straight
+- Right straight
 - Hook
 - Uppercut
 - Block
 - Idle
+
+In the current implementation, the vision module first distinguishes `left_straight` and `right_straight`. These can later be mapped to Jab / Cross depending on the player's stance.
 
 ---
 
@@ -171,8 +173,7 @@ Punch intensity estimated by the radar directly affects damage calculation and c
 
 | Function | Webcam | Radar |
 |----------|--------|-------|
-| Jab Recognition | ✓ | |
-| Cross Recognition | ✓ | |
+| Straight Punch Recognition | ✓ | |
 | Hook Recognition | ✓ | |
 | Uppercut Recognition | ✓ | |
 | Block Detection | ✓ | |
@@ -192,7 +193,7 @@ Punch intensity estimated by the radar directly affects damage calculation and c
 
 ### Vision
 
-- Standard USB Webcam
+- Laptop built-in webcam or standard USB webcam
 
 ### Processing
 
@@ -201,6 +202,222 @@ Punch intensity estimated by the radar directly affects damage calculation and c
 - MediaPipe
 - NumPy
 - SciPy
+- Matplotlib
+
+---
+
+## Environment Setup
+
+This project currently targets Windows + Python 3.13 because the tested environment uses:
+
+```text
+Python 3.13
+mediapipe 0.10.35
+opencv-contrib-python 4.13.0.92
+```
+
+### Option A: Conda environment
+
+Create the environment from `environment.yml`:
+
+```powershell
+conda env create -f environment.yml
+conda activate radarbox
+```
+
+### Option B: Existing virtual environment
+
+If you already use `.venv`, install the required packages manually:
+
+```powershell
+python -m pip install --upgrade pip
+python -m pip install numpy scipy matplotlib mediapipe opencv-contrib-python
+```
+
+The current `vision_agent.py` uses the newer MediaPipe Tasks API, not the legacy `mp.solutions.pose` API.
+
+---
+
+## MediaPipe Pose Landmarker Model
+
+The vision module requires a MediaPipe Pose Landmarker task model file.
+
+Create a `models` folder:
+
+```powershell
+mkdir models
+```
+
+Download the official lite model:
+
+```powershell
+Invoke-WebRequest `
+  -Uri "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task" `
+  -OutFile ".\models\pose_landmarker_lite.task"
+```
+
+Expected project layout:
+
+```text
+boxing-with-ai/
+├── src/
+│   ├── radar-agent.py
+│   └── vision_agent.py
+├── models/
+│   └── pose_landmarker_lite.task
+├── environment.yml
+└── README.md
+```
+
+Run the vision module:
+
+```powershell
+python .\src\vision_agent.py --debug --model-path .\models\pose_landmarker_lite.task
+```
+
+---
+
+## Running the Radar Agent
+
+Start the Python radar receiver before starting radar capture:
+
+```powershell
+python .\src\radar-agent.py --plot
+```
+
+Then use mmWave Studio to start DCA1000 capture and AWR2243 frame.
+
+For the current RadarBox configuration, RadarAgent expects:
+
+```text
+1Tx + 4Rx
+256 ADC samples
+64 chirps per frame
+20 ms frame period
+UDP data port 4098
+PC IP: 192.168.33.30
+DCA1000 IP: 192.168.33.180
+```
+
+When the radar stream is healthy, the console should show approximately:
+
+```text
+[RadarAgent] first packet: seq=...
+[RadarAgent] status=OK fps=50.0/50.0
+```
+
+---
+
+## Running the Vision Agent
+
+Run:
+
+```powershell
+python .\src\vision_agent.py --debug --model-path .\models\pose_landmarker_lite.task
+```
+
+A debug webcam window should open. The overlay should show:
+
+```text
+Action: idle / left_straight / right_straight / block / ...
+L:<left hand state> R:<right hand state> Block:<True/False>
+FPS:<camera FPS> Status:OK
+```
+
+---
+
+## Expected VisionAgent Behavior
+
+The current VisionAgent is a rule-based first version. It is expected to be usable for debugging and integration, but thresholds may need tuning.
+
+### Healthy startup
+
+Expected:
+
+```text
+[VisionAgent] starting
+[VisionAgent] camera opened
+Status: OK
+```
+
+The debug window should show a stable skeleton on the player's upper body.
+
+### Idle / guard behavior
+
+When the player is standing still or only holding a normal guard pose:
+
+```text
+Expected:
+- No continuous punch spam
+- Action should usually stay idle or block
+- Block should start once and remain active until hands leave the guard area
+```
+
+If the console continuously prints punch events while the player is idle, the motion thresholds are too sensitive.
+
+### Straight punch behavior
+
+For one clean left or right straight punch:
+
+```text
+Expected:
+- One event per punch
+- action=left_straight or action=right_straight
+- phase=impact
+- confidence usually above 0.5
+- camera_speed should be finite and not extremely large
+```
+
+Example:
+
+```text
+[VisionAgent] event action=right_straight hand=right phase=impact conf=0.70 speed=4.57
+```
+
+### Block behavior
+
+When both hands are raised near the face or upper chest:
+
+```text
+Expected:
+[VisionAgent] event action=block hand=both phase=block_start
+```
+
+When the hands leave the block pose:
+
+```text
+Expected:
+[VisionAgent] event action=block_end hand=both phase=block_end
+```
+
+### Signs that threshold tuning is needed
+
+The following are not ideal for gameplay:
+
+```text
+- Punch events are repeatedly generated while idle
+- `fallback_hook` or `fallback_uppercut` appears too often
+- camera_speed suddenly jumps to extremely large values, such as 40+
+- block_start appears many times without a clean block_end
+- a single punch generates multiple events
+```
+
+These usually mean that landmark tracking jitter, motion threshold, or block threshold should be tuned.
+
+---
+
+## Suggested Development Order
+
+1. Verify `vision_agent.py --debug`.
+2. Tune VisionAgent thresholds until one punch produces one clean event.
+3. Verify `radar-agent.py --plot`.
+4. Build `fusion_core.py`:
+   - receive `PlayerActionEvent`
+   - query `radar_agent.query_burst(impact_time - 0.10, impact_time + 0.15)`
+   - output `FusedPlayerEvent`
+5. Build `game_engine.py`:
+   - consume `FusedPlayerEvent`
+   - calculate Hit / Miss / Blocked / Critical Hit
 
 ---
 
@@ -213,6 +430,7 @@ Potential future extensions include:
 - Adaptive difficulty AI
 - Reinforcement-learning-based opponent behavior
 - Radar micro-Doppler analysis for advanced punch characterization
+- Learning-based punch classification using recorded webcam pose sequences
 
 ---
 
