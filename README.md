@@ -4,20 +4,252 @@
 
 RadarBox is a real-time interactive boxing platform that combines human pose estimation from a webcam with Doppler-based motion sensing from a TI AWR2243 mmWave radar.
 
-The system recognizes boxing actions such as **Jab**, **Cross**, **Hook**, **Uppercut**, and **Block**, while simultaneously estimating punch intensity using radar Doppler signatures. By combining visual semantics with radar dynamics, RadarBox enables an immersive AI boxing experience where players physically fight against a virtual opponent.
+The system uses:
+
+- **Webcam + MediaPipe** to recognize boxing actions such as straight punches, hooks, uppercuts, and block.
+- **TI AWR2243 + DCA1000 mmWave radar** to estimate Doppler velocity and punch intensity, especially for forward straight punches.
+- **Camera-guided radar fusion** to search for radar Doppler bursts only during the camera-detected punch impact window.
 
 ---
 
-## Motivation
+## Quick Start
 
-Modern vision-based motion gaming systems can accurately recognize human actions, but estimating the speed and intensity of fast punches remains challenging due to motion blur, depth ambiguity, and camera frame rate limitations.
+### 1. Create and activate Python environment
 
-On the other hand, mmWave radar can directly measure radial velocity through the Doppler effect, making it suitable for capturing fast forward punches. However, radar alone lacks the semantic understanding required to distinguish different boxing actions.
+Using an existing `.venv` on Windows PowerShell:
 
-RadarBox combines the strengths of both sensors:
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+```
 
-- **Camera:** Understands what action is being performed.
-- **Radar:** Measures how fast and how explosively the action is executed.
+Or use Conda:
+
+```powershell
+conda env create -f environment.yml
+conda activate radarbox
+```
+
+---
+
+### 2. Install this project as an editable package
+
+From the project root:
+
+```powershell
+pip install -e .
+```
+
+This makes files in `src/` importable from scripts in `scripts/`.
+
+For example, after editable install, this should work:
+
+```powershell
+python -c "import punch_vision_common; print('ok')"
+```
+
+Expected:
+
+```text
+ok
+```
+
+---
+
+### 3. Download the MediaPipe PoseLandmarker model
+
+Create the model folder:
+
+```powershell
+mkdir models
+```
+
+Download the official MediaPipe Pose Landmarker Lite task model:
+
+```powershell
+Invoke-WebRequest `
+  -Uri "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task" `
+  -OutFile ".\models\pose_landmarker_lite.task"
+```
+
+Expected file:
+
+```text
+models/pose_landmarker_lite.task
+```
+
+---
+
+### 4. Record a punch dataset
+
+Record right-hand punch samples:
+
+```powershell
+python .\scripts\record_punch_dataset.py --label right_straight --hand right --count 30
+python .\scripts\record_punch_dataset.py --label right_hook     --hand right --count 30
+python .\scripts\record_punch_dataset.py --label right_uppercut --hand right --count 30
+python .\scripts\record_punch_dataset.py --label negative      --hand right --count 30
+```
+
+During recording:
+
+```text
+SPACE = record one sample
+q     = quit
+```
+
+For each sample, wait for `GO!`, then throw exactly one punch.
+
+For `negative`, record non-punch motions such as:
+
+```text
+standing still
+guard pose
+small body movement
+hands moving slowly
+adjusting posture
+fake punch / incomplete punch
+```
+
+The dataset will be saved under:
+
+```text
+data/punch_dataset/
+```
+
+---
+
+### 5. Train the punch classifier
+
+```powershell
+python .\scripts\train_punch_classifier.py `
+  --dataset .\data\punch_dataset `
+  --out .\models\punch_classifier.joblib `
+  --hand right
+```
+
+Expected output includes:
+
+```text
+classification report
+confusion matrix
+CV accuracy
+models/punch_classifier.joblib
+models/punch_classifier.json
+```
+
+A reasonable first result is around:
+
+```text
+accuracy ≈ 0.90
+CV accuracy ≈ 0.90+
+```
+
+More samples usually improve stability.
+
+---
+
+### 6. Run the trajectory-based VisionAgent
+
+```powershell
+python .\src\vision_agent_trajectory.py `
+  --debug `
+  --classifier .\models\punch_classifier.joblib `
+  --model-path .\models\pose_landmarker_lite.task `
+  --active-hand right `
+  --confidence-threshold 0.60
+```
+
+Expected runtime events:
+
+```text
+[TrajectoryVisionAgent] event action=right_straight conf=...
+[TrajectoryVisionAgent] event action=right_hook conf=...
+[TrajectoryVisionAgent] event action=right_uppercut conf=...
+[TrajectoryVisionAgent] event action=block conf=...
+[TrajectoryVisionAgent] event action=block_end conf=...
+```
+
+If many predictions are shown as `low_conf`, lower the threshold:
+
+```powershell
+--confidence-threshold 0.50
+```
+
+If the agent outputs too many wrong events, raise the threshold:
+
+```powershell
+--confidence-threshold 0.70
+```
+
+---
+
+### 7. Run the RadarAgent
+
+Start the Python radar UDP receiver before starting radar frame capture:
+
+```powershell
+python .\src\radar_agent.py --plot
+```
+
+Then use mmWave Studio to configure AWR2243 + DCA1000 and start capture.
+
+Current expected radar configuration:
+
+```text
+Radar: TI AWR2243 + DCA1000
+Mode: 1Tx + 4Rx
+ADC samples: 256
+Loops per frame: 64
+Frame period: 20 ms
+UDP data port: 4098
+PC IP: 192.168.33.30
+DCA1000 IP: 192.168.33.180
+```
+
+Healthy radar stream should show approximately:
+
+```text
+[RadarAgent] first packet: seq=...
+[RadarAgent] status=OK fps=50.0/50.0
+```
+
+---
+
+## Project Layout
+
+Recommended layout:
+
+```text
+boxing-with-ai/
+├── setup.py
+├── environment.yml
+├── README.md
+├── models/
+│   ├── pose_landmarker_lite.task
+│   └── punch_classifier.joblib
+├── data/
+│   └── punch_dataset/
+├── scripts/
+│   ├── record_punch_dataset.py
+│   └── train_punch_classifier.py
+└── src/
+    ├── punch_vision_common.py
+    ├── vision_agent_trajectory.py
+    └── radar_agent.py
+```
+
+### Important files
+
+| File | Purpose |
+|------|---------|
+| `setup.py` | Makes `src/` importable through `pip install -e .` |
+| `src/punch_vision_common.py` | Shared MediaPipe detector, landmark utilities, trajectory feature extraction, dataset save/load |
+| `scripts/record_punch_dataset.py` | Records MediaPipe trajectory samples into `.npz` dataset files |
+| `scripts/train_punch_classifier.py` | Trains a scikit-learn punch classifier from recorded samples |
+| `src/vision_agent_trajectory.py` | Runtime vision agent for punch recognition and block detection |
+| `src/radar_agent.py` | Runtime radar UDP receiver and Doppler burst query service |
 
 ---
 
@@ -27,21 +259,24 @@ RadarBox combines the strengths of both sensors:
 
 The vision subsystem performs:
 
-- Human pose estimation
-- Boxing action classification
-- Motion phase detection
+- MediaPipe human pose estimation
+- Punch trajectory segmentation
+- Trajectory feature extraction
+- Punch classification
 - Guard / block detection
 
 Recognized actions:
 
-- Left straight
-- Right straight
-- Hook
-- Uppercut
-- Block
-- Idle
+```text
+right_straight
+right_hook
+right_uppercut
+block
+block_end
+negative / idle
+```
 
-In the current implementation, the vision module first distinguishes `left_straight` and `right_straight`. These can later be mapped to Jab / Cross depending on the player's stance.
+The current recommended implementation is trajectory-based. It uses the full motion segment instead of a single-frame wrist velocity peak.
 
 ---
 
@@ -56,7 +291,7 @@ The radar subsystem performs:
 - Doppler burst extraction
 - Punch intensity estimation
 
-The radar is primarily used for estimating the intensity of forward punches, where Doppler measurements are most reliable.
+The radar is primarily used for estimating the intensity of forward straight punches, where Doppler measurements are most reliable.
 
 ---
 
@@ -66,41 +301,64 @@ The radar is primarily used for estimating the intensity of forward punches, whe
 
 A key challenge in radar-based motion sensing is that the strongest Doppler peak is not always generated by the punching hand. Body sway, arm motion, and environmental reflections may also contribute to strong Doppler signatures.
 
-RadarBox addresses this issue through a camera-guided fusion strategy.
+RadarBox addresses this issue through a camera-guided fusion strategy:
 
-The camera first detects:
+```text
+Webcam / MediaPipe
+    ↓
+Punch trajectory recognition
+    ↓
+Impact time window
+    ↓
+Radar Doppler burst query
+    ↓
+Punch intensity score
+```
 
-- Punch type
-- Motion phase
-- Impact window
+The camera determines the punch type and approximate impact window. The radar then searches for Doppler bursts only inside that window.
 
-The radar then searches for Doppler bursts only within the detected impact window.
-
-This significantly reduces false detections and improves punch intensity estimation.
+This reduces false Doppler detections and improves punch intensity estimation.
 
 ---
 
-## Motion Phase Detection
+## Motion Phase and Trajectory Recognition
 
-Each punch is divided into four stages:
+Each punch is treated as a short trajectory segment:
 
 ```text
 Preparation
     ↓
-Extension
+Extension / Swing
     ↓
 Impact
     ↓
 Recovery
 ```
 
-Motion phase information is used to synchronize camera observations and radar measurements.
+The trajectory classifier uses features such as:
+
+```text
+dx / dy / dz
+upward displacement
+path length
+straightness
+curvature
+maximum speed
+mean speed
+extension gain
+elbow angle change
+horizontal dominance
+vertical dominance
+resampled wrist trajectory
+```
+
+This is more reliable than classifying from a single frame.
 
 ---
 
 ## Punch Intensity Estimation
 
-After generating the Range-Doppler map:
+After radar Range-Doppler processing:
 
 ```text
 ADC Samples
@@ -120,67 +378,276 @@ The instantaneous Doppler velocity is estimated by:
 v_hat(t) = argmax_v Σ P(r, v, t)
 ```
 
-where `P(r, v, t)` denotes the Doppler power at range `r`, velocity `v`, and time `t`.
+where `P(r, v, t)` denotes Doppler power at range `r`, velocity `v`, and time `t`.
 
-The punch intensity score is defined as:
+The punch intensity score is:
 
 ```text
 I_punch = max |v_hat(t)|
 ```
 
-within the impact window provided by the camera subsystem.
+inside the impact window given by the vision subsystem.
 
 ---
 
-## AI Boxing Engine
+## Integration Plan
 
-The game engine operates as a finite-state machine.
-
-### AI States
+The intended runtime architecture is:
 
 ```text
-Idle
-Attack
-Defense
-Cooldown
+VisionAgent
+    ↓ PlayerActionEvent
+FusionCore
+    ↓ query radar burst if needed
+RadarAgent
+    ↓ RadarBurstEvent
+FusionCore
+    ↓ FusedPlayerEvent
+GameEngine
+    ↓
+Hit / Miss / Blocked / Critical Hit
 ```
 
-### Player Actions
+For example:
 
-```text
-Jab
-Cross
-Hook
-Uppercut
-Block
+```python
+action = vision_agent.get_next_action_event()
+
+if action and action.action_type == "right_straight":
+    burst = radar_agent.query_burst(
+        action.impact_time - 0.10,
+        action.impact_time + 0.15,
+    )
 ```
 
-### Combat Outcomes
-
-```text
-Hit
-Critical Hit
-Blocked
-Miss
-Combo
-```
-
-Punch intensity estimated by the radar directly affects damage calculation and combo scoring.
+Straight punches can use both camera recognition and radar intensity. Hook and uppercut can initially be camera-only.
 
 ---
 
-## Sensor Fusion Strategy
+## Expected VisionAgent Behavior
 
-| Function | Webcam | Radar |
-|----------|--------|-------|
-| Straight Punch Recognition | ✓ | |
-| Hook Recognition | ✓ | |
-| Uppercut Recognition | ✓ | |
-| Block Detection | ✓ | |
-| Motion Phase Detection | ✓ | |
-| Punch Intensity Estimation | | ✓ |
-| Doppler Velocity Measurement | | ✓ |
-| Final Combat Decision | ✓ | ✓ |
+### Healthy startup
+
+Expected:
+
+```text
+[TrajectoryVisionAgent] classifier labels: [...]
+[TrajectoryVisionAgent] camera opened
+```
+
+The debug window should show:
+
+```text
+State: idle / recording
+Hand: right
+Pred: ...
+Block: True / False
+Status: OK
+```
+
+### Good runtime behavior
+
+For clean right-hand punches:
+
+```text
+one punch → one event
+```
+
+Expected examples:
+
+```text
+event action=right_straight conf=0.83
+event action=right_hook conf=0.84
+event action=right_uppercut conf=0.88
+```
+
+For block:
+
+```text
+event action=block hand=both phase=block_start
+event action=block_end hand=both phase=block_end
+```
+
+For idle or random non-punch movement:
+
+```text
+negative/idle pred=negative
+```
+
+---
+
+## Tuning
+
+### Confidence threshold
+
+If too many valid punches are ignored:
+
+```powershell
+--confidence-threshold 0.50
+```
+
+If wrong events appear too often:
+
+```powershell
+--confidence-threshold 0.70
+```
+
+Recommended starting value:
+
+```powershell
+--confidence-threshold 0.60
+```
+
+---
+
+### Motion segmentation
+
+If punches are not detected at all:
+
+```powershell
+--motion-start-speed 0.80
+```
+
+If random small movements start too many segments:
+
+```powershell
+--motion-start-speed 1.20
+```
+
+---
+
+### Block detection
+
+If block is too hard to trigger:
+
+```powershell
+--block-enter-frames 5 --block-max-hand-speed 1.20
+```
+
+If block triggers too easily:
+
+```powershell
+--block-enter-frames 12 --block-exit-frames 8
+```
+
+To disable block during debugging:
+
+```powershell
+--disable-block
+```
+
+---
+
+## Troubleshooting
+
+### `ModuleNotFoundError: No module named 'punch_vision_common'`
+
+Run editable install from the project root:
+
+```powershell
+pip install -e .
+```
+
+Then test:
+
+```powershell
+python -c "import punch_vision_common; print('ok')"
+```
+
+---
+
+### `PoseLandmarker model not found`
+
+Make sure this file exists:
+
+```text
+models/pose_landmarker_lite.task
+```
+
+Download it again if needed:
+
+```powershell
+Invoke-WebRequest `
+  -Uri "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task" `
+  -OutFile ".\models\pose_landmarker_lite.task"
+```
+
+---
+
+### MediaPipe warning about XNNPACK or feedback tensors
+
+These messages are usually harmless:
+
+```text
+INFO: Created TensorFlow Lite XNNPACK delegate for CPU.
+Feedback manager requires a model with a single signature inference.
+```
+
+They do not normally indicate a runtime failure.
+
+---
+
+### `Failed to send to clearcut`
+
+This MediaPipe telemetry-related warning is also usually harmless:
+
+```text
+Failed to send to clearcut
+```
+
+It does not prevent pose detection.
+
+---
+
+### Too many `low_conf` predictions
+
+Try:
+
+```powershell
+--confidence-threshold 0.50
+```
+
+Also record more examples for the confusing classes.
+
+---
+
+### Classifier accuracy is not high enough
+
+Record more samples:
+
+```text
+right_straight: 50+
+right_hook: 50+
+right_uppercut: 50+
+negative: 50+
+```
+
+Add difficult negative examples:
+
+```text
+guard movement
+slow hand extension
+body sway
+hands down
+fake punches
+partial punches
+```
+
+---
+
+### RadarAgent shows `NO_STREAM`
+
+Check:
+
+```text
+DCA1000 Ethernet IP settings
+Windows firewall
+mmWave Studio capture status
+DCA1000 data port 4098
+PC IP 192.168.33.30
+```
+
+Also make sure the Python radar receiver is started before radar frame capture.
 
 ---
 
@@ -193,7 +660,7 @@ Punch intensity estimated by the radar directly affects damage calculation and c
 
 ### Vision
 
-- Laptop built-in webcam or standard USB webcam
+- Laptop built-in webcam or USB webcam
 
 ### Processing
 
@@ -202,241 +669,32 @@ Punch intensity estimated by the radar directly affects damage calculation and c
 - MediaPipe
 - NumPy
 - SciPy
+- scikit-learn
+- joblib
 - Matplotlib
-
----
-
-## Environment Setup
-
-This project currently targets Windows + Python 3.13 because the tested environment uses:
-
-```text
-Python 3.13
-mediapipe 0.10.35
-opencv-contrib-python 4.13.0.92
-```
-
-### Option A: Conda environment
-
-Create the environment from `environment.yml`:
-
-```powershell
-conda env create -f environment.yml
-conda activate radarbox
-```
-
-### Option B: Existing virtual environment
-
-If you already use `.venv`, install the required packages manually:
-
-```powershell
-python -m pip install --upgrade pip
-python -m pip install numpy scipy matplotlib mediapipe opencv-contrib-python
-```
-
-The current `vision_agent.py` uses the newer MediaPipe Tasks API, not the legacy `mp.solutions.pose` API.
-
----
-
-## MediaPipe Pose Landmarker Model
-
-The vision module requires a MediaPipe Pose Landmarker task model file.
-
-Create a `models` folder:
-
-```powershell
-mkdir models
-```
-
-Download the official lite model:
-
-```powershell
-Invoke-WebRequest `
-  -Uri "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task" `
-  -OutFile ".\models\pose_landmarker_lite.task"
-```
-
-Expected project layout:
-
-```text
-boxing-with-ai/
-├── src/
-│   ├── radar-agent.py
-│   └── vision_agent.py
-├── models/
-│   └── pose_landmarker_lite.task
-├── environment.yml
-└── README.md
-```
-
-Run the vision module:
-
-```powershell
-python .\src\vision_agent.py --debug --model-path .\models\pose_landmarker_lite.task
-```
-
----
-
-## Running the Radar Agent
-
-Start the Python radar receiver before starting radar capture:
-
-```powershell
-python .\src\radar-agent.py --plot
-```
-
-Then use mmWave Studio to start DCA1000 capture and AWR2243 frame.
-
-For the current RadarBox configuration, RadarAgent expects:
-
-```text
-1Tx + 4Rx
-256 ADC samples
-64 chirps per frame
-20 ms frame period
-UDP data port 4098
-PC IP: 192.168.33.30
-DCA1000 IP: 192.168.33.180
-```
-
-When the radar stream is healthy, the console should show approximately:
-
-```text
-[RadarAgent] first packet: seq=...
-[RadarAgent] status=OK fps=50.0/50.0
-```
-
----
-
-## Running the Vision Agent
-
-Run:
-
-```powershell
-python .\src\vision_agent.py --debug --model-path .\models\pose_landmarker_lite.task
-```
-
-A debug webcam window should open. The overlay should show:
-
-```text
-Action: idle / left_straight / right_straight / block / ...
-L:<left hand state> R:<right hand state> Block:<True/False>
-FPS:<camera FPS> Status:OK
-```
-
----
-
-## Expected VisionAgent Behavior
-
-The current VisionAgent is a rule-based first version. It is expected to be usable for debugging and integration, but thresholds may need tuning.
-
-### Healthy startup
-
-Expected:
-
-```text
-[VisionAgent] starting
-[VisionAgent] camera opened
-Status: OK
-```
-
-The debug window should show a stable skeleton on the player's upper body.
-
-### Idle / guard behavior
-
-When the player is standing still or only holding a normal guard pose:
-
-```text
-Expected:
-- No continuous punch spam
-- Action should usually stay idle or block
-- Block should start once and remain active until hands leave the guard area
-```
-
-If the console continuously prints punch events while the player is idle, the motion thresholds are too sensitive.
-
-### Straight punch behavior
-
-For one clean left or right straight punch:
-
-```text
-Expected:
-- One event per punch
-- action=left_straight or action=right_straight
-- phase=impact
-- confidence usually above 0.5
-- camera_speed should be finite and not extremely large
-```
-
-Example:
-
-```text
-[VisionAgent] event action=right_straight hand=right phase=impact conf=0.70 speed=4.57
-```
-
-### Block behavior
-
-When both hands are raised near the face or upper chest:
-
-```text
-Expected:
-[VisionAgent] event action=block hand=both phase=block_start
-```
-
-When the hands leave the block pose:
-
-```text
-Expected:
-[VisionAgent] event action=block_end hand=both phase=block_end
-```
-
-### Signs that threshold tuning is needed
-
-The following are not ideal for gameplay:
-
-```text
-- Punch events are repeatedly generated while idle
-- `fallback_hook` or `fallback_uppercut` appears too often
-- camera_speed suddenly jumps to extremely large values, such as 40+
-- block_start appears many times without a clean block_end
-- a single punch generates multiple events
-```
-
-These usually mean that landmark tracking jitter, motion threshold, or block threshold should be tuned.
-
----
-
-## Suggested Development Order
-
-1. Verify `vision_agent.py --debug`.
-2. Tune VisionAgent thresholds until one punch produces one clean event.
-3. Verify `radar-agent.py --plot`.
-4. Build `fusion_core.py`:
-   - receive `PlayerActionEvent`
-   - query `radar_agent.query_burst(impact_time - 0.10, impact_time + 0.15)`
-   - output `FusedPlayerEvent`
-5. Build `game_engine.py`:
-   - consume `FusedPlayerEvent`
-   - calculate Hit / Miss / Blocked / Critical Hit
 
 ---
 
 ## Future Work
 
-Potential future extensions include:
+Potential extensions:
 
-- Multi-player boxing mode
+- FusionCore for combining vision events with radar bursts
+- GameEngine finite-state machine
+- Left-hand punch support
+- Two-hand free boxing mode
+- Larger personalized punch dataset
+- More robust classifier calibration
 - Multi-radar velocity reconstruction
 - Adaptive difficulty AI
 - Reinforcement-learning-based opponent behavior
-- Radar micro-Doppler analysis for advanced punch characterization
-- Learning-based punch classification using recorded webcam pose sequences
 
 ---
 
 ## Project Highlights
 
 - Real-time boxing action recognition
+- Personalized trajectory-based punch classification
 - Radar-based punch intensity estimation
 - Camera-guided Doppler burst extraction
 - Multi-sensor decision fusion
