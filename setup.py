@@ -6,10 +6,10 @@ setup(
     description="RadarBox camera-radar fusion boxing system",
     package_dir={"": "src"},
     py_modules=[
-        "punch_vision_common",
-        "radar_agent",
-        "vision_agent_trajectory",
-        "fusion_core",
+        "core.punch_vision_common",
+        "core.radar_agent",
+        "core.vision_agent",
+        "core.fusion_core",
     ], 
     python_requires=">=3.10",
     install_requires=[

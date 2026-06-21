@@ -36,7 +36,7 @@ from sklearn.model_selection import train_test_split, StratifiedKFold, cross_val
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 
-from punch_vision_common import load_segment_npz, extract_punch_features
+from core.punch_vision_common import load_segment_npz, extract_punch_features
 
 
 def load_dataset(dataset_dir: Path, hand: str, resample_len: int):

@@ -30,7 +30,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from punch_vision_common import (
+from core.punch_vision_common import (
     PoseDetectorConfig,
     PoseTaskDetector,
     LandmarkFrame,

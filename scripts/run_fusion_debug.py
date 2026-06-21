@@ -50,12 +50,12 @@ try:
 except Exception:
     cv2 = None
 
-from vision_agent_trajectory import VisionAgent, TrajectoryVisionConfig
-from fusion_core import FusionCore, FusionConfig
+from core.vision_agent import VisionAgent, TrajectoryVisionConfig
+from core.fusion_core import FusionCore, FusionConfig
 
 # Radar is optional because camera-only debug is useful.
 try:
-    from radar_agent import RadarAgent, RadarConfig
+    from core.radar_agent import RadarAgent, RadarConfig
 except Exception as e:
     RadarAgent = None
     RadarConfig = None

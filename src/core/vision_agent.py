@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 r"""
-vision_agent_trajectory.py
+vision_agent.py
 
 Trajectory-based VisionAgent for RadarBox.
 
@@ -14,16 +14,16 @@ This replaces the earlier single-frame / peak-rule classifier with:
 
 Train first:
 
-    python .\src\record_punch_dataset.py --label right_straight --hand right --count 30
-    python .\src\record_punch_dataset.py --label right_hook     --hand right --count 30
-    python .\src\record_punch_dataset.py --label right_uppercut --hand right --count 30
-    python .\src\record_punch_dataset.py --label negative      --hand right --count 30
+    python .\scripts\record_punch_dataset.py --label right_straight --hand right --count 30
+    python .\scripts\record_punch_dataset.py --label right_hook     --hand right --count 30
+    python .\scripts\record_punch_dataset.py --label right_uppercut --hand right --count 30
+    python .\scripts\record_punch_dataset.py --label negative      --hand right --count 30
 
-    python .\src\train_punch_classifier.py --dataset .\data\punch_dataset --out .\models\punch_classifier.joblib --hand right
+    python .\scripts\train_punch_classifier.py --dataset .\data\punch_dataset --out .\models\punch_classifier.joblib --hand right
 
 Run:
 
-    python .\src\vision_agent_trajectory.py --debug --classifier .\models\punch_classifier.joblib
+    python .\src\core\vision_agent.py --debug --classifier .\models\punch_classifier.joblib
 """
 
 from __future__ import annotations
@@ -41,7 +41,7 @@ import cv2
 import joblib
 import numpy as np
 
-from punch_vision_common import (
+from core.punch_vision_common import (
     PoseDetectorConfig,
     PoseTaskDetector,
     LandmarkFrame,
