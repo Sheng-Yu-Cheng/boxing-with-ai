@@ -27,8 +27,10 @@ class KeyboardInputBuffer:
 
 
 class FusionInputSource:
-    def __init__(self, fusion_core: Any):
+    def __init__(self, fusion_core: Any, vision_agent: Any = None, radar_agent: Any = None):
         self.fusion_core = fusion_core
+        self.vision_agent = vision_agent
+        self.radar_agent = radar_agent
 
     def start(self) -> None:
         if hasattr(self.fusion_core, "start"):
@@ -202,4 +204,8 @@ def build_fusion_input_source(args) -> tuple[FusionInputSource, list[Any]]:
     )
     fusion_core = FusionCore(vision_agent=vision_agent, radar_agent=radar_agent, config=cfg)
 
-    return FusionInputSource(fusion_core), [vision_agent, radar_agent, fusion_core]
+    return FusionInputSource(
+        fusion_core,
+        vision_agent=vision_agent,
+        radar_agent=radar_agent,
+    ), [vision_agent, radar_agent, fusion_core]

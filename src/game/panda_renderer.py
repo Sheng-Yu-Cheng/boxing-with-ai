@@ -5,7 +5,10 @@ import math
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from core.vision_agent import PlayerPoseState
 
 try:
     import panda3d_gltf  # noqa: F401
@@ -270,6 +273,31 @@ class PlayerHandsController:
         cur = node.getPos()
         node.setPos(cur + (target - cur) * alpha)
 
+    def update_from_pose_state(self, pose_state: "PlayerPoseState", dt: float) -> None:
+        """Drive glove visuals from the continuous VisionAgent pose stream."""
+        del dt  # Reserved for time-based smoothing/tuning later.
+
+        def target_for_hand(pose_hand, idle: Vec3) -> Vec3:
+            if not pose_state.pose_detected or not pose_hand.detected:
+                return idle
+            return Vec3(
+                pose_hand.x * self.args.pose_scale_x,
+                self.args.hand_y + pose_hand.y * self.args.pose_depth_scale,
+                pose_hand.z * self.args.pose_scale_z + self.args.pose_z_offset,
+            )
+
+        alpha = max(0.0, min(1.0, float(self.args.pose_smoothing_alpha)))
+        self._smooth_set_pos(
+            self.right_glove,
+            target_for_hand(pose_state.right_hand, self.idle_right_pos),
+            alpha,
+        )
+        self._smooth_set_pos(
+            self.left_glove,
+            target_for_hand(pose_state.left_hand, self.idle_left_pos),
+            alpha,
+        )
+
     def update(self, dt: float):
         if self.blocking:
             right_target = self.guard_right_pos
@@ -301,7 +329,13 @@ class RadarBoxGameApp(ShowBase):
         self.game_core = GameCore()
         self.keyboard = KeyboardInputBuffer()
         self.fusion_input = None
+        self.vision_agent = None
         self.sensor_objects = []
+        self.pose_control_enabled = (
+            args.pose_control
+            if getattr(args, "pose_control", None) is not None
+            else args.input in ("fusion", "hybrid")
+        )
         self.scene_path = resolve_path(args.scene)
         self.opponent_path = resolve_path(args.opponent)
         self.glove_path = resolve_path(args.glove)
@@ -367,6 +401,7 @@ class RadarBoxGameApp(ShowBase):
     def _setup_fusion_input(self):
         try:
             self.fusion_input, self.sensor_objects = build_fusion_input_source(self.args)
+            self.vision_agent = self.fusion_input.vision_agent
             self.fusion_input.start()
             print("[Game] Fusion input started")
         except Exception as e:
@@ -374,6 +409,7 @@ class RadarBoxGameApp(ShowBase):
                 raise
             print(f"[Game] Fusion input failed; continuing with keyboard only: {type(e).__name__}: {e}")
             self.fusion_input = None
+            self.vision_agent = None
 
     def _setup_ui(self):
         help_text = (
@@ -454,7 +490,18 @@ class RadarBoxGameApp(ShowBase):
     def _update(self, task):
         dt = self.clock.getDt()
         self._consume_events()
-        self.hands.update(dt)
+        pose_state = None
+        if (
+            self.pose_control_enabled
+            and self.vision_agent is not None
+            and hasattr(self.vision_agent, "get_latest_player_pose_state")
+        ):
+            pose_state = self.vision_agent.get_latest_player_pose_state()
+
+        if pose_state is not None:
+            self.hands.update_from_pose_state(pose_state, dt)
+        else:
+            self.hands.update(dt)
         self._update_ui()
         return task.cont
 
@@ -478,6 +525,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--vision-debug", action="store_true")
     parser.add_argument("--active-hand", default="right")
     parser.add_argument("--confidence-threshold", type=float, default=0.60)
+    pose_control = parser.add_mutually_exclusive_group()
+    pose_control.add_argument("--pose-control", dest="pose_control", action="store_true")
+    pose_control.add_argument("--no-pose-control", dest="pose_control", action="store_false")
+    parser.set_defaults(pose_control=None)
+    parser.add_argument("--pose-scale-x", type=float, default=0.75)
+    parser.add_argument("--pose-scale-z", type=float, default=0.75)
+    parser.add_argument("--pose-depth-scale", type=float, default=0.80)
+    parser.add_argument("--pose-z-offset", type=float, default=-0.35)
+    parser.add_argument("--pose-smoothing-alpha", type=float, default=0.35)
     parser.add_argument("--radar-pc-ip", default="192.168.33.30")
     parser.add_argument("--radar-data-port", type=int, default=4098)
     parser.add_argument("--radar-min-abs-velocity", type=float, default=2.0)

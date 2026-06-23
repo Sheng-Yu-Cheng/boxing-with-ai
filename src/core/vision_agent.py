@@ -71,6 +71,27 @@ class PlayerActionEvent:
 
 
 @dataclass
+class HandPose:
+    detected: bool
+    x: float
+    y: float
+    z: float
+    vx: float
+    vy: float
+    vz: float
+    speed: float
+
+
+@dataclass
+class PlayerPoseState:
+    timestamp: float
+    pose_detected: bool
+    left_hand: HandPose
+    right_hand: HandPose
+    block_score: float = 0.0
+
+
+@dataclass
 class TrajectoryVisionConfig:
     classifier_path: str = "models/punch_classifier.joblib"
     model_path: str = "models/pose_landmarker_lite.task"
@@ -125,6 +146,7 @@ class VisionAgent:
         self._latest_status = "not_started"
         self._latest_prediction = "none"
         self._latest_confidence = 0.0
+        self._latest_pose_state: Optional[PlayerPoseState] = None
 
         self._rolling_frames: deque[LandmarkFrame] = deque(maxlen=int(config.fps * 3))
         self._segment_frames: list[LandmarkFrame] = []
@@ -164,6 +186,20 @@ class VisionAgent:
         with self._lock:
             return None if self._latest_debug_image is None else self._latest_debug_image.copy()
 
+    def get_latest_player_pose_state(self) -> Optional[PlayerPoseState]:
+        """Return a snapshot of the latest continuous, body-normalized hand pose."""
+        with self._lock:
+            state = self._latest_pose_state
+            if state is None:
+                return None
+            return PlayerPoseState(
+                timestamp=state.timestamp,
+                pose_detected=state.pose_detected,
+                left_hand=HandPose(**vars(state.left_hand)),
+                right_hand=HandPose(**vars(state.right_hand)),
+                block_score=state.block_score,
+            )
+
     def _worker(self):
         self._cap = cv2.VideoCapture(self.cfg.camera_index)
         self._cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.cfg.width)
@@ -188,6 +224,12 @@ class VisionAgent:
             pose_frame = self.detector.detect(frame_bgr, now, self._frame_id)
             self._frame_id += 1
 
+            with self._lock:
+                previous_pose_state = self._latest_pose_state
+            pose_state = self._build_player_pose_state(pose_frame, previous_pose_state)
+            with self._lock:
+                self._latest_pose_state = pose_state
+
             self._rolling_frames.append(pose_frame)
             speed = self._active_hand_speed(pose_frame)
 
@@ -196,6 +238,55 @@ class VisionAgent:
             dbg = self._draw_debug(frame_bgr, pose_frame, speed)
             with self._lock:
                 self._latest_debug_image = dbg
+
+    @staticmethod
+    def _missing_hand_pose() -> HandPose:
+        return HandPose(False, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+
+    def _build_player_pose_state(
+        self,
+        frame: LandmarkFrame,
+        previous: Optional[PlayerPoseState],
+    ) -> PlayerPoseState:
+        if not frame.pose_detected:
+            return PlayerPoseState(
+                timestamp=frame.timestamp,
+                pose_detected=False,
+                left_hand=self._missing_hand_pose(),
+                right_hand=self._missing_hand_pose(),
+            )
+
+        landmarks = frame.landmarks
+        mid_shoulder = 0.5 * (landmarks[LEFT_SHOULDER, :3] + landmarks[RIGHT_SHOULDER, :3])
+        mid_hip = 0.5 * (landmarks[LEFT_HIP, :3] + landmarks[RIGHT_HIP, :3])
+        body_scale = max(float(np.linalg.norm(mid_shoulder[:2] - mid_hip[:2])), 1e-4)
+
+        def make_hand(wrist_i: int, shoulder_i: int, previous_hand: Optional[HandPose]) -> HandPose:
+            wrist = landmarks[wrist_i, :3]
+            shoulder = landmarks[shoulder_i, :3]
+            relative = (wrist - mid_shoulder) / body_scale
+            x = float(relative[0])
+            y = float(np.linalg.norm(wrist[:2] - shoulder[:2]) / body_scale)
+            z = float(-relative[1])
+
+            vx = vy = vz = 0.0
+            if previous is not None and previous_hand is not None and previous_hand.detected:
+                dt = frame.timestamp - previous.timestamp
+                if dt > 1e-4:
+                    vx = (x - previous_hand.x) / dt
+                    vy = (y - previous_hand.y) / dt
+                    vz = (z - previous_hand.z) / dt
+            speed = float(np.linalg.norm([vx, vy, vz]))
+            return HandPose(True, x, y, z, vx, vy, vz, speed)
+
+        previous_left = previous.left_hand if previous is not None else None
+        previous_right = previous.right_hand if previous is not None else None
+        return PlayerPoseState(
+            timestamp=frame.timestamp,
+            pose_detected=True,
+            left_hand=make_hand(LEFT_WRIST, LEFT_SHOULDER, previous_left),
+            right_hand=make_hand(RIGHT_WRIST, RIGHT_SHOULDER, previous_right),
+        )
 
     def _active_hand_speed(self, frame: LandmarkFrame) -> float:
         if not frame.pose_detected or len(self._rolling_frames) < 2:
