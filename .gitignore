@@ -10,3 +10,7 @@ __pycache__/
 
 models/
 data/
+
+*.blend
+*.blend1
+*.fbx
