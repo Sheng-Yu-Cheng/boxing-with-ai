@@ -10,6 +10,10 @@ setup(
         "core.radar_agent",
         "core.vision_agent",
         "core.fusion_core",
+        "game.events", 
+        "game.game_core", 
+        "game.input_sources", 
+        "game.panda_renderer"
     ], 
     python_requires=">=3.10",
     install_requires=[
