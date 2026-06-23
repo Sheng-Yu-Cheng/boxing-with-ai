@@ -2,21 +2,156 @@
 
 **A Camera-Radar Fusion Interactive Boxing System**
 
-RadarBox is a real-time interactive boxing platform that combines human pose estimation from a webcam with Doppler-based motion sensing from a TI AWR2243 mmWave radar.
+RadarBox is a real-time interactive boxing game that combines:
 
-The system uses:
+- **Webcam + MediaPipe Pose** for boxing action recognition.
+- **TI AWR2243 + DCA1000 mmWave radar** for Doppler velocity and punch intensity estimation.
+- **FusionCore** for combining camera events and radar bursts.
+- **Panda3D** for a playable 3D alpha game with scene, opponent model, first-person gloves, animations, HP, block, hit reactions, and keyboard / fusion input.
 
-- **Webcam + MediaPipe** to recognize boxing actions such as straight punches, hooks, uppercuts, and block.
-- **TI AWR2243 + DCA1000 mmWave radar** to estimate Doppler velocity and punch intensity, especially for forward straight punches.
-- **Camera-guided radar fusion** to search for radar Doppler bursts only during the camera-detected punch impact window.
+The current project goal is no longer only “sensor demo.” It is now an **interactive boxing alpha game**:
+
+```text
+Player webcam/radar input
+        ↓
+VisionAgent / RadarAgent
+        ↓
+FusionCore
+        ↓
+GameCore
+        ↓
+Panda3D renderer
+        ↓
+Opponent animation + player gloves + HP UI
+```
 
 ---
 
-## Quick Start
+## Current Status
 
-### 1. Create and activate Python environment
+### Working / mostly implemented
 
-Using an existing `.venv` on Windows PowerShell:
+- Trajectory-based `VisionAgent`
+- Radar UDP receiver / `RadarAgent`
+- `FusionCore`
+- Trained punch classifier workflow
+- Panda3D game prototype
+- `opponent.glb` with Mixamo animations
+- First-person `boxing_glove.glb` + texture
+- `scene.glb`
+- Keyboard-controlled alpha game
+- Planned FusionCore-to-game integration
+
+### Current important issue
+
+The current `VisionAgent` constructor is config-style:
+
+```python
+VisionAgent(config: TrajectoryVisionConfig)
+```
+
+Therefore game integration code must **not** instantiate it as:
+
+```python
+VisionAgent(model_path=..., classifier_path=...)
+```
+
+Instead, it must build:
+
+```python
+TrajectoryVisionConfig(
+    classifier_path=args.classifier,
+    model_path=args.pose_model,
+    camera_index=args.camera_index,
+    active_hand=args.active_hand,
+    confidence_threshold=args.confidence_threshold,
+)
+```
+
+and then:
+
+```python
+vision_agent = VisionAgent(config)
+```
+
+A patch script was created for this:
+
+```text
+patch_game_system_v2.py
+```
+
+Codex should make sure this fix is applied directly inside:
+
+```text
+src/game/input_sources.py
+```
+
+---
+
+## Current Project Layout
+
+Current intended layout:
+
+```text
+boxing-with-ai/
+├── assets/
+│   ├── scene.glb
+│   ├── opponent.glb
+│   ├── boxing_glove.glb
+│   └── boxing_glove.png
+├── data/
+│   └── punch_dataset/
+├── models/
+│   ├── pose_landmarker_lite.task
+│   ├── punch_classifier.joblib
+│   └── punch_classifier.json
+├── scripts/
+│   ├── game/
+│   │   ├── run_game.py
+│   │   ├── alpha_game.py                  # older monolithic prototype
+│   │   ├── test_opponent_animation.py
+│   │   └── test_player_gloves_v2.py
+│   ├── radar/
+│   └── vision/
+├── src/
+│   ├── core/
+│   │   ├── punch_vision_common.py
+│   │   ├── vision_agent.py
+│   │   ├── radar_agent.py
+│   │   └── fusion_core.py
+│   └── game/
+│       ├── __init__.py
+│       ├── events.py
+│       ├── game_core.py
+│       ├── input_sources.py
+│       └── panda_renderer.py
+├── setup.py
+├── environment.yml
+└── README.md
+```
+
+The current recommended import paths are:
+
+```python
+from core.vision_agent import VisionAgent, TrajectoryVisionConfig
+from core.radar_agent import RadarAgent
+from core.fusion_core import FusionCore, FusionConfig
+```
+
+and:
+
+```python
+from game.game_core import GameCore
+from game.events import GameInputEvent, RenderCommand
+```
+
+---
+
+## Installation
+
+### 1. Create environment
+
+Windows PowerShell:
 
 ```powershell
 python -m venv .venv
@@ -24,64 +159,384 @@ python -m venv .venv
 python -m pip install --upgrade pip
 ```
 
-Or use Conda:
+or Conda:
 
 ```powershell
 conda env create -f environment.yml
 conda activate radarbox
 ```
 
----
+### 2. Install dependencies
 
-### 2. Install this project as an editable package
-
-From the project root:
+At minimum:
 
 ```powershell
 pip install -e .
+pip install panda3d panda3d-gltf
 ```
 
-This makes files in `src/` importable from scripts in `scripts/`.
+The project also uses:
 
-For example, after editable install, this should work:
+```text
+opencv-python
+mediapipe
+numpy
+scipy
+scikit-learn
+joblib
+matplotlib
+```
+
+### 3. Verify imports
+
+From project root:
 
 ```powershell
-python -c "import punch_vision_common; print('ok')"
+python -c "import core.vision_agent; import core.fusion_core; print('core ok')"
+python -c "import game.panda_renderer; print('game ok')"
 ```
 
 Expected:
 
 ```text
-ok
+core ok
+game ok
 ```
 
 ---
 
-### 3. Download the MediaPipe PoseLandmarker model
+## Assets
 
-Create the model folder:
-
-```powershell
-mkdir models
-```
-
-Download the official MediaPipe Pose Landmarker Lite task model:
-
-```powershell
-Invoke-WebRequest `
-  -Uri "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task" `
-  -OutFile ".\models\pose_landmarker_lite.task"
-```
-
-Expected file:
+The alpha game expects:
 
 ```text
-models/pose_landmarker_lite.task
+assets/scene.glb
+assets/opponent.glb
+assets/boxing_glove.glb
+assets/boxing_glove.png
+```
+
+### Opponent model
+
+`assets/opponent.glb` is a Mixamo character exported from Blender as GLB.
+
+Current animation clips observed:
+
+```text
+Block
+Cross Punch
+Cross Punch Mirror
+Hook Punch
+Hook Punch Mirror
+Idle
+Light Hit To Head
+Receive Uppercut To The Face
+Stunned
+Uppercut
+Uppercut Mirror
+```
+
+The game maps these to:
+
+```python
+idle              -> "Idle"
+block             -> "Block"
+light_hit         -> "Light Hit To Head"
+receive_uppercut  -> "Receive Uppercut To The Face"
+stunned           -> "Stunned"
+cross             -> "Cross Punch"
+hook              -> "Hook Punch"
+uppercut          -> "Uppercut"
+```
+
+### Player model
+
+The player currently uses first-person gloves:
+
+```text
+assets/boxing_glove.glb
+assets/boxing_glove.png
+```
+
+The glove model is duplicated into:
+
+```text
+right_glove
+left_glove
+```
+
+The left glove is currently mirrored programmatically.
+
+### Scene
+
+The scene is:
+
+```text
+assets/scene.glb
+```
+
+Current preferred scene / opponent defaults:
+
+```python
+SCENE_RESIZE = 0.11
+SCENE_POS_X = 0.0
+SCENE_POS_Y = -2.0
+SCENE_POS_Z = 0.0
+SCENE_HEADING = 0.0
+
+OPPONENT_POS_X = 0.0
+OPPONENT_POS_Y = 0.0
+OPPONENT_POS_Z = 0.0
+OPPONENT_SCALE = 1.0
+OPPONENT_HEADING = 0.0
+```
+
+The renderer also adds a simple environment:
+
+```python
+SKY_COLOR = (0.45, 0.72, 0.98, 1.0)
+GROUND_COLOR = (0.22, 0.60, 0.22, 1.0)
+GROUND_Z = -2.0
+GROUND_SIZE = 80.0
 ```
 
 ---
 
-### 4. Record a punch dataset
+## Quick Start: Game
+
+### 1. Keyboard-only game
+
+Run this first to verify assets, renderer, UI, opponent animations, and gloves:
+
+```powershell
+python .\scripts\game\run_game.py --input keyboard
+```
+
+Controls:
+
+```text
+J : right straight
+H : right hook
+U : right uppercut
+
+F : left straight
+G : left hook
+T : left uppercut
+
+B : player block
+O : opponent block toggle
+K : force opponent stunned
+R : reset
+Esc : quit
+```
+
+Expected behavior:
+
+- Scene loads.
+- Opponent loads.
+- Player gloves appear in first-person view.
+- Punch keys move the gloves.
+- Opponent HP decreases.
+- Opponent plays hit / block / stunned reactions.
+- UI shows HP and last action.
+
+### 2. Fusion mode, camera only
+
+After keyboard mode works:
+
+```powershell
+python .\scripts\game\run_game.py `
+  --input fusion `
+  --pose-model .\models\pose_landmarker_lite.task `
+  --classifier .\models\punch_classifier.joblib `
+  --confidence-threshold 0.60
+```
+
+Expected flow:
+
+```text
+VisionAgent
+    ↓ PlayerActionEvent
+FusionCore
+    ↓ FusedPlayerEvent
+GameInputEvent
+    ↓
+GameCore
+    ↓ RenderCommand
+Panda3D renderer
+```
+
+### 3. Fusion mode, camera + radar
+
+Start AWR2243 / DCA1000 streaming first, then run:
+
+```powershell
+python .\scripts\game\run_game.py `
+  --input fusion `
+  --enable-radar `
+  --pose-model .\models\pose_landmarker_lite.task `
+  --classifier .\models\punch_classifier.joblib `
+  --confidence-threshold 0.60 `
+  --radar-min-abs-velocity 2.0
+```
+
+Straight punches use radar if available. Hook and uppercut are currently camera-only.
+
+---
+
+## Game Architecture
+
+The current game system is intentionally **not** a web frontend + backend split.
+
+It is one Python process, but internally separated into:
+
+```text
+Input layer
+    keyboard / FusionCore
+
+Game backend / logic layer
+    GameCore
+    CombatState
+    damage / block / KO / reactions
+
+Renderer frontend layer
+    Panda3D
+    scene.glb
+    opponent.glb
+    boxing gloves
+    UI
+```
+
+### Data flow
+
+```text
+KeyboardInputBuffer / FusionInputSource
+        ↓
+GameInputEvent
+        ↓
+GameCore.handle_player_event()
+        ↓
+RenderCommand
+        ↓
+Panda3D renderer
+```
+
+### Important rule
+
+Keep these boundaries:
+
+```text
+FusionCore does not know Panda3D.
+GameCore does not know Panda3D.
+Panda3D renderer does not decide damage.
+RadarAgent does not touch game state.
+VisionAgent does not touch game state.
+```
+
+---
+
+## Game Modules
+
+### `src/game/events.py`
+
+Defines common game-facing dataclasses:
+
+```python
+GameInputEvent
+RenderCommand
+```
+
+Also converts:
+
+```python
+FusedPlayerEvent -> GameInputEvent
+```
+
+### `src/game/game_core.py`
+
+Renderer-independent game logic.
+
+Responsibilities:
+
+- player HP
+- opponent HP
+- block state
+- damage calculation
+- KO / stunned state
+- choosing opponent reaction type
+
+It should output `RenderCommand`, not call Panda3D directly.
+
+### `src/game/input_sources.py`
+
+Input adapters.
+
+Responsibilities:
+
+- collect keyboard input
+- construct `VisionAgent`
+- optionally construct `RadarAgent`
+- construct `FusionCore`
+- poll `FusionCore.get_next_fused_event()`
+- convert fused events into `GameInputEvent`
+
+Important implementation note:
+
+`VisionAgent` must be constructed using `TrajectoryVisionConfig`.
+
+Correct pattern:
+
+```python
+from core.vision_agent import VisionAgent, TrajectoryVisionConfig
+
+cfg = TrajectoryVisionConfig(
+    classifier_path=args.classifier,
+    model_path=args.pose_model,
+    camera_index=args.camera_index,
+    active_hand=args.active_hand,
+    confidence_threshold=args.confidence_threshold,
+)
+
+vision_agent = VisionAgent(cfg)
+vision_agent.start()
+```
+
+### `src/game/panda_renderer.py`
+
+Panda3D rendering and visual controllers.
+
+Responsibilities:
+
+- load scene
+- add blue sky and green ground
+- load opponent actor
+- map opponent animations
+- load first-person gloves
+- apply glove texture
+- render HP / action UI
+- apply `RenderCommand`
+
+### `scripts/game/run_game.py`
+
+Entry point.
+
+Expected command:
+
+```powershell
+python .\scripts\game\run_game.py --input keyboard
+```
+
+or:
+
+```powershell
+python .\scripts\game\run_game.py --input fusion
+```
+
+---
+
+## Vision System
+
+### Dataset recording
 
 Record right-hand punch samples:
 
@@ -101,7 +556,7 @@ q     = quit
 
 For each sample, wait for `GO!`, then throw exactly one punch.
 
-For `negative`, record non-punch motions such as:
+For `negative`, record non-punch motions:
 
 ```text
 standing still
@@ -112,15 +567,7 @@ adjusting posture
 fake punch / incomplete punch
 ```
 
-The dataset will be saved under:
-
-```text
-data/punch_dataset/
-```
-
----
-
-### 5. Train the punch classifier
+### Train classifier
 
 ```powershell
 python .\scripts\train_punch_classifier.py `
@@ -129,7 +576,7 @@ python .\scripts\train_punch_classifier.py `
   --hand right
 ```
 
-Expected output includes:
+Expected output:
 
 ```text
 classification report
@@ -139,26 +586,37 @@ models/punch_classifier.joblib
 models/punch_classifier.json
 ```
 
-A reasonable first result is around:
+Current observed performance was around:
 
 ```text
-accuracy ≈ 0.90
-CV accuracy ≈ 0.90+
+holdout accuracy ≈ 0.90
+CV accuracy ≈ 0.93
 ```
 
-More samples usually improve stability.
+### Run VisionAgent directly
 
----
+Current implementation path:
 
-### 6. Run the trajectory-based VisionAgent
+```text
+src/core/vision_agent.py
+```
+
+Run:
 
 ```powershell
-python .\src\vision_agent_trajectory.py `
+python .\src\core\vision_agent.py `
   --debug `
   --classifier .\models\punch_classifier.joblib `
   --model-path .\models\pose_landmarker_lite.task `
   --active-hand right `
   --confidence-threshold 0.60
+```
+
+Expected startup:
+
+```text
+[TrajectoryVisionAgent] classifier labels: [...]
+[TrajectoryVisionAgent] camera opened
 ```
 
 Expected runtime events:
@@ -167,30 +625,16 @@ Expected runtime events:
 [TrajectoryVisionAgent] event action=right_straight conf=...
 [TrajectoryVisionAgent] event action=right_hook conf=...
 [TrajectoryVisionAgent] event action=right_uppercut conf=...
-[TrajectoryVisionAgent] event action=block conf=...
-[TrajectoryVisionAgent] event action=block_end conf=...
-```
-
-If many predictions are shown as `low_conf`, lower the threshold:
-
-```powershell
---confidence-threshold 0.50
-```
-
-If the agent outputs too many wrong events, raise the threshold:
-
-```powershell
---confidence-threshold 0.70
 ```
 
 ---
 
-### 7. Run the RadarAgent
+## Radar System
 
 Start the Python radar UDP receiver before starting radar frame capture:
 
 ```powershell
-python .\src\radar_agent.py --plot
+python .\src\core\radar_agent.py --plot
 ```
 
 Then use mmWave Studio to configure AWR2243 + DCA1000 and start capture.
@@ -208,279 +652,192 @@ PC IP: 192.168.33.30
 DCA1000 IP: 192.168.33.180
 ```
 
-Healthy radar stream should show approximately:
+Healthy radar stream:
 
 ```text
 [RadarAgent] first packet: seq=...
 [RadarAgent] status=OK fps=50.0/50.0
 ```
 
----
-
-## Project Layout
-
-Recommended layout:
+Radar is mainly used for:
 
 ```text
-boxing-with-ai/
-├── setup.py
-├── environment.yml
-├── README.md
-├── models/
-│   ├── pose_landmarker_lite.task
-│   └── punch_classifier.joblib
-├── data/
-│   └── punch_dataset/
-├── scripts/
-│   ├── record_punch_dataset.py
-│   └── train_punch_classifier.py
-└── src/
-    ├── punch_vision_common.py
-    ├── vision_agent_trajectory.py
-    └── radar_agent.py
-```
-
-### Important files
-
-| File | Purpose |
-|------|---------|
-| `setup.py` | Makes `src/` importable through `pip install -e .` |
-| `src/punch_vision_common.py` | Shared MediaPipe detector, landmark utilities, trajectory feature extraction, dataset save/load |
-| `scripts/record_punch_dataset.py` | Records MediaPipe trajectory samples into `.npz` dataset files |
-| `scripts/train_punch_classifier.py` | Trains a scikit-learn punch classifier from recorded samples |
-| `src/vision_agent_trajectory.py` | Runtime vision agent for punch recognition and block detection |
-| `src/radar_agent.py` | Runtime radar UDP receiver and Doppler burst query service |
-
----
-
-## System Overview
-
-### Webcam Module
-
-The vision subsystem performs:
-
-- MediaPipe human pose estimation
-- Punch trajectory segmentation
-- Trajectory feature extraction
-- Punch classification
-- Guard / block detection
-
-Recognized actions:
-
-```text
+left_straight
 right_straight
-right_hook
-right_uppercut
-block
-block_end
-negative / idle
 ```
 
-The current recommended implementation is trajectory-based. It uses the full motion segment instead of a single-frame wrist velocity peak.
+Hook and uppercut are camera-only in the first stable version.
 
 ---
 
-### Radar Module
+## FusionCore
 
-The radar subsystem performs:
-
-- FMCW signal acquisition
-- Range FFT
-- Doppler FFT
-- Range-Doppler map generation
-- Doppler burst extraction
-- Punch intensity estimation
-
-The radar is primarily used for estimating the intensity of forward straight punches, where Doppler measurements are most reliable.
-
----
-
-## Core Contribution
-
-### Camera-Guided Doppler Burst Estimation
-
-A key challenge in radar-based motion sensing is that the strongest Doppler peak is not always generated by the punching hand. Body sway, arm motion, and environmental reflections may also contribute to strong Doppler signatures.
-
-RadarBox addresses this issue through a camera-guided fusion strategy:
+Current implementation path:
 
 ```text
-Webcam / MediaPipe
-    ↓
-Punch trajectory recognition
-    ↓
-Impact time window
-    ↓
-Radar Doppler burst query
-    ↓
-Punch intensity score
+src/core/fusion_core.py
 ```
 
-The camera determines the punch type and approximate impact window. The radar then searches for Doppler bursts only inside that window.
-
-This reduces false Doppler detections and improves punch intensity estimation.
-
----
-
-## Motion Phase and Trajectory Recognition
-
-Each punch is treated as a short trajectory segment:
-
-```text
-Preparation
-    ↓
-Extension / Swing
-    ↓
-Impact
-    ↓
-Recovery
-```
-
-The trajectory classifier uses features such as:
-
-```text
-dx / dy / dz
-upward displacement
-path length
-straightness
-curvature
-maximum speed
-mean speed
-extension gain
-elbow angle change
-horizontal dominance
-vertical dominance
-resampled wrist trajectory
-```
-
-This is more reliable than classifying from a single frame.
-
----
-
-## Punch Intensity Estimation
-
-After radar Range-Doppler processing:
-
-```text
-ADC Samples
-    ↓
-Range FFT
-    ↓
-Doppler FFT
-    ↓
-Range-Doppler Map
-    ↓
-Velocity Burst Extraction
-```
-
-The instantaneous Doppler velocity is estimated by:
-
-```text
-v_hat(t) = argmax_v Σ P(r, v, t)
-```
-
-where `P(r, v, t)` denotes Doppler power at range `r`, velocity `v`, and time `t`.
-
-The punch intensity score is:
-
-```text
-I_punch = max |v_hat(t)|
-```
-
-inside the impact window given by the vision subsystem.
-
----
-
-## Integration Plan
-
-The intended runtime architecture is:
+Expected runtime flow:
 
 ```text
 VisionAgent
     ↓ PlayerActionEvent
 FusionCore
-    ↓ query radar burst if needed
+    ↓ query RadarAgent if straight punch
 RadarAgent
     ↓ RadarBurstEvent
 FusionCore
     ↓ FusedPlayerEvent
 GameEngine
-    ↓
-Hit / Miss / Blocked / Critical Hit
 ```
 
-For example:
+For straight punches:
 
 ```python
-action = vision_agent.get_next_action_event()
-
-if action and action.action_type == "right_straight":
-    burst = radar_agent.query_burst(
-        action.impact_time - 0.10,
-        action.impact_time + 0.15,
-    )
+radar_agent.query_burst(
+    action.impact_time - 0.10,
+    action.impact_time + 0.15,
+    range_min_m=0.6,
+    range_max_m=2.5,
+    min_abs_velocity_mps=2.0,
+)
 ```
 
-Straight punches can use both camera recognition and radar intensity. Hook and uppercut can initially be camera-only.
-
----
-
-## Expected VisionAgent Behavior
-
-### Healthy startup
-
-Expected:
+For hook / uppercut:
 
 ```text
-[TrajectoryVisionAgent] classifier labels: [...]
-[TrajectoryVisionAgent] camera opened
-```
-
-The debug window should show:
-
-```text
-State: idle / recording
-Hand: right
-Pred: ...
-Block: True / False
-Status: OK
-```
-
-### Good runtime behavior
-
-For clean right-hand punches:
-
-```text
-one punch → one event
-```
-
-Expected examples:
-
-```text
-event action=right_straight conf=0.83
-event action=right_hook conf=0.84
-event action=right_uppercut conf=0.88
+camera-only
 ```
 
 For block:
 
 ```text
-event action=block hand=both phase=block_start
-event action=block_end hand=both phase=block_end
+pass-through
 ```
 
-For idle or random non-punch movement:
+Important config:
+
+```python
+FusionConfig(
+    radar_min_abs_velocity_mps=2.0,
+    require_radar_for_straight=False,
+    verbose=True,
+)
+```
+
+---
+
+## Known Bugs / Notes for Codex
+
+### 1. VisionAgent constructor bug
+
+If this appears:
 
 ```text
-negative/idle pred=negative
+VisionAgent.__init__() missing 1 required positional argument: 'config'
 ```
+
+Fix `src/game/input_sources.py`.
+
+Do not instantiate:
+
+```python
+VisionAgent(model_path=..., classifier_path=...)
+```
+
+Instead:
+
+```python
+cfg = TrajectoryVisionConfig(
+    classifier_path=args.classifier,
+    model_path=args.pose_model,
+    camera_index=args.camera_index,
+    active_hand=args.active_hand,
+    confidence_threshold=args.confidence_threshold,
+)
+vision_agent = VisionAgent(cfg)
+```
+
+### 2. Opponent heading
+
+Current preferred default:
+
+```python
+OPPONENT_HEADING = 0.0
+```
+
+The earlier `180.0` value was tested but later changed by user preference.
+
+### 3. Scene heading
+
+Current preferred default:
+
+```python
+SCENE_HEADING = 0.0
+```
+
+Earlier `45.0` was used temporarily, but current user preference is `0.0`.
+
+### 4. Scene position / scale
+
+Current preferred default:
+
+```python
+SCENE_RESIZE = 0.11
+SCENE_POS_Y = -2.0
+```
+
+### 5. Monolithic alpha vs modular game
+
+There may still be older files:
+
+```text
+scripts/game/alpha_game.py
+scripts/game/test_player_gloves_v2.py
+scripts/game/test_opponent_animation.py
+```
+
+These are useful test scripts, but the current main entry point should be:
+
+```text
+scripts/game/run_game.py
+```
+
+### 6. Always test in this order
+
+1. Keyboard game:
+   ```powershell
+   python .\scripts\game\run_game.py --input keyboard
+   ```
+
+2. VisionAgent alone:
+   ```powershell
+   python .\src\core\vision_agent.py --debug --classifier .\models\punch_classifier.joblib --model-path .\models\pose_landmarker_lite.task --confidence-threshold 0.60
+   ```
+
+3. Fusion game, camera only:
+   ```powershell
+   python .\scripts\game\run_game.py --input fusion --pose-model .\models\pose_landmarker_lite.task --classifier .\models\punch_classifier.joblib --confidence-threshold 0.60
+   ```
+
+4. RadarAgent alone:
+   ```powershell
+   python .\src\core\radar_agent.py --plot
+   ```
+
+5. Fusion game, camera + radar:
+   ```powershell
+   python .\scripts\game\run_game.py --input fusion --enable-radar --pose-model .\models\pose_landmarker_lite.task --classifier .\models\punch_classifier.joblib --confidence-threshold 0.60 --radar-min-abs-velocity 2.0
+   ```
 
 ---
 
 ## Tuning
 
-### Confidence threshold
+### Vision confidence threshold
 
-If too many valid punches are ignored:
+If valid punches are ignored:
 
 ```powershell
 --confidence-threshold 0.50
@@ -498,11 +855,9 @@ Recommended starting value:
 --confidence-threshold 0.60
 ```
 
----
-
 ### Motion segmentation
 
-If punches are not detected at all:
+If punches are not detected:
 
 ```powershell
 --motion-start-speed 0.80
@@ -514,57 +869,53 @@ If random small movements start too many segments:
 --motion-start-speed 1.20
 ```
 
----
+### Radar minimum velocity
 
-### Block detection
-
-If block is too hard to trigger:
+For straight punch Doppler burst:
 
 ```powershell
---block-enter-frames 5 --block-max-hand-speed 1.20
+--radar-min-abs-velocity 2.0
 ```
 
-If block triggers too easily:
-
-```powershell
---block-enter-frames 12 --block-exit-frames 8
-```
-
-To disable block during debugging:
-
-```powershell
---disable-block
-```
+Earlier values around `0.5` were too permissive and could select slow body motion.
 
 ---
 
 ## Troubleshooting
 
-### `ModuleNotFoundError: No module named 'punch_vision_common'`
+### `ModuleNotFoundError: No module named 'core'`
 
-Run editable install from the project root:
+Run:
 
 ```powershell
 pip install -e .
 ```
 
-Then test:
+Then verify:
 
 ```powershell
-python -c "import punch_vision_common; print('ok')"
+python -c "import core.vision_agent; print('ok')"
 ```
 
----
+### `ModuleNotFoundError: No module named 'game'`
+
+Run:
+
+```powershell
+pip install -e .
+```
+
+or make sure `scripts/game/run_game.py` inserts `src/` into `sys.path`.
 
 ### `PoseLandmarker model not found`
 
-Make sure this file exists:
+Make sure this exists:
 
 ```text
 models/pose_landmarker_lite.task
 ```
 
-Download it again if needed:
+Download:
 
 ```powershell
 Invoke-WebRequest `
@@ -572,70 +923,7 @@ Invoke-WebRequest `
   -OutFile ".\models\pose_landmarker_lite.task"
 ```
 
----
-
-### MediaPipe warning about XNNPACK or feedback tensors
-
-These messages are usually harmless:
-
-```text
-INFO: Created TensorFlow Lite XNNPACK delegate for CPU.
-Feedback manager requires a model with a single signature inference.
-```
-
-They do not normally indicate a runtime failure.
-
----
-
-### `Failed to send to clearcut`
-
-This MediaPipe telemetry-related warning is also usually harmless:
-
-```text
-Failed to send to clearcut
-```
-
-It does not prevent pose detection.
-
----
-
-### Too many `low_conf` predictions
-
-Try:
-
-```powershell
---confidence-threshold 0.50
-```
-
-Also record more examples for the confusing classes.
-
----
-
-### Classifier accuracy is not high enough
-
-Record more samples:
-
-```text
-right_straight: 50+
-right_hook: 50+
-right_uppercut: 50+
-negative: 50+
-```
-
-Add difficult negative examples:
-
-```text
-guard movement
-slow hand extension
-body sway
-hands down
-fake punches
-partial punches
-```
-
----
-
-### RadarAgent shows `NO_STREAM`
+### `NO_STREAM` from RadarAgent
 
 Check:
 
@@ -647,57 +935,73 @@ DCA1000 data port 4098
 PC IP 192.168.33.30
 ```
 
-Also make sure the Python radar receiver is started before radar frame capture.
+Start Python radar receiver before starting radar frame capture.
+
+### Panda3D cannot load GLB
+
+Install:
+
+```powershell
+pip install panda3d-gltf
+```
+
+Make sure the file exists:
+
+```powershell
+Test-Path .\assets\opponent.glb
+Test-Path .\assets\scene.glb
+Test-Path .\assets\boxing_glove.glb
+```
+
+### Opponent animation names do not match
+
+Run:
+
+```powershell
+python .\scripts\game\test_opponent_animation.py --model .\assets\opponent.glb
+```
+
+Check printed animation names and update mapping in `OpponentController`.
 
 ---
 
-## Hardware
+## Recommended Codex Tasks
 
-### Radar
+### Immediate
 
-- TI AWR2243 mmWave Radar
-- DCA1000 Data Capture Card
+1. Apply the `VisionAgent(config)` fix in `src/game/input_sources.py`.
+2. Verify keyboard game mode.
+3. Verify fusion camera-only mode.
+4. Keep current defaults:
+   ```python
+   SCENE_RESIZE = 0.11
+   SCENE_POS_Y = -2.0
+   SCENE_HEADING = 0.0
+   OPPONENT_HEADING = 0.0
+   ```
+5. Make sure `run_game.py` is the main entry point.
 
-### Vision
+### Next
 
-- Laptop built-in webcam or USB webcam
-
-### Processing
-
-- Python
-- OpenCV
-- MediaPipe
-- NumPy
-- SciPy
-- scikit-learn
-- joblib
-- Matplotlib
-
----
-
-## Future Work
-
-Potential extensions:
-
-- FusionCore for combining vision events with radar bursts
-- GameEngine finite-state machine
-- Left-hand punch support
-- Two-hand free boxing mode
-- Larger personalized punch dataset
-- More robust classifier calibration
-- Multi-radar velocity reconstruction
-- Adaptive difficulty AI
-- Reinforcement-learning-based opponent behavior
+1. Add optional VisionAgent debug preview window in fusion mode.
+2. Add cleaner HP bars instead of plain text.
+3. Add hit spark / impact effect.
+4. Add opponent AI attack loop.
+5. Add player HP damage when opponent attacks and player is not blocking.
+6. Replace keyboard glove animation with continuous `VisionAgent` hand pose later.
+7. Add replay/logging of fused events for debugging.
 
 ---
 
 ## Project Highlights
 
 - Real-time boxing action recognition
-- Personalized trajectory-based punch classification
-- Radar-based punch intensity estimation
-- Camera-guided Doppler burst extraction
-- Multi-sensor decision fusion
-- Interactive AI boxing gameplay
+- Personalized trajectory-based punch classifier
+- Camera-guided radar Doppler burst estimation
+- Radar intensity scoring for straight punches
+- Modular GameCore / Panda3D renderer architecture
+- First-person player gloves
+- Animated Mixamo opponent
+- Fusion-ready interactive boxing alpha game
 
-RadarBox demonstrates how human-understandable visual information and physically meaningful radar measurements can be combined to create a richer interactive gaming experience.
+RadarBox demonstrates how human-understandable visual information and physically meaningful radar measurements can be combined into a playable real-time interactive boxing system.
