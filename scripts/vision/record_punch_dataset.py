@@ -6,10 +6,10 @@ Manual MediaPipe trajectory recorder for RadarBox.
 
 Recommended data collection:
 
-    python .\src\record_punch_dataset.py --label right_straight --hand right --count 30
-    python .\src\record_punch_dataset.py --label right_hook     --hand right --count 30
-    python .\src\record_punch_dataset.py --label right_uppercut --hand right --count 30
-    python .\src\record_punch_dataset.py --label negative      --hand right --count 30
+    python .\scripts\vision\record_punch_dataset.py --label right_straight --hand right --count 10
+    python .\scripts\vision\record_punch_dataset.py --label right_hook     --hand right --count 10
+    python .\scripts\vision\record_punch_dataset.py --label right_uppercut --hand right --count 10
+    python .\scripts\vision\record_punch_dataset.py --label negative      --hand right --count 10
 
 How to record:
     - A webcam window opens.
@@ -55,6 +55,20 @@ def draw_text(img, lines, x=20, y=35, scale=0.7):
         y += int(32 * scale + 12)
 
 
+def prepare_input_frame(frame_bgr, mirror_input: bool):
+    """Return the exact frame orientation used for detection and saved landmarks."""
+    return cv2.flip(frame_bgr, 1) if mirror_input else frame_bgr
+
+
+def make_display(frame_bgr, pose_frame, mirror_input: bool, mirror_display: bool):
+    display = draw_pose(frame_bgr, pose_frame)
+    # When input is already mirrored, the detection/display frame is already
+    # selfie-oriented. This flag remains useful with --no-mirror-input.
+    if mirror_display and not mirror_input:
+        display = cv2.flip(display, 1)
+    return display
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Record RadarBox punch trajectory dataset")
     parser.add_argument("--label", required=True, help="right_straight / right_hook / right_uppercut / negative")
@@ -68,7 +82,15 @@ def main() -> None:
     parser.add_argument("--fps", type=int, default=30)
     parser.add_argument("--record-seconds", type=float, default=1.10)
     parser.add_argument("--countdown", type=float, default=0.60)
-    parser.add_argument("--mirror-display", action="store_true", help="mirror display only; saved landmarks are from unmirrored frame")
+    mirror = parser.add_mutually_exclusive_group()
+    mirror.add_argument("--mirror-input", dest="mirror_input", action="store_true")
+    mirror.add_argument("--no-mirror-input", dest="mirror_input", action="store_false")
+    parser.set_defaults(mirror_input=True)
+    parser.add_argument(
+        "--mirror-display",
+        action="store_true",
+        help="mirror display only when --no-mirror-input is used",
+    )
     args = parser.parse_args()
 
     out_dir = Path(args.out_dir) / args.label
@@ -80,6 +102,7 @@ def main() -> None:
     print()
     print("[Recorder] label:", args.label)
     print("[Recorder] hand :", args.hand)
+    print("[Recorder] mirrored input:", args.mirror_input)
     print("[Recorder] Press SPACE to record one sample. Press q to quit.")
     print()
 
@@ -95,14 +118,15 @@ def main() -> None:
                 time.sleep(0.01)
                 continue
 
+            input_frame = prepare_input_frame(frame_bgr, args.mirror_input)
             now = time.perf_counter()
-            pose_frame = detector.detect(frame_bgr, now, frame_id)
+            pose_frame = detector.detect(input_frame, now, frame_id)
             frame_id += 1
             last_pose = pose_frame
 
-            display = draw_pose(frame_bgr, pose_frame)
-            if args.mirror_display:
-                display = cv2.flip(display, 1)
+            display = make_display(
+                input_frame, pose_frame, args.mirror_input, args.mirror_display
+            )
 
             draw_text(display, [
                 f"Label: {args.label}    Hand: {args.hand}",
@@ -127,11 +151,12 @@ def main() -> None:
                 if not ok:
                     continue
                 remaining = args.countdown - (time.perf_counter() - start_countdown)
-                pose_frame = detector.detect(frame_bgr, time.perf_counter(), frame_id)
+                input_frame = prepare_input_frame(frame_bgr, args.mirror_input)
+                pose_frame = detector.detect(input_frame, time.perf_counter(), frame_id)
                 frame_id += 1
-                display = draw_pose(frame_bgr, pose_frame)
-                if args.mirror_display:
-                    display = cv2.flip(display, 1)
+                display = make_display(
+                    input_frame, pose_frame, args.mirror_input, args.mirror_display
+                )
                 draw_text(display, [
                     f"Get ready: {remaining:.1f}s",
                     f"Label: {args.label}",
@@ -146,14 +171,15 @@ def main() -> None:
                 ok, frame_bgr = cap.read()
                 if not ok:
                     continue
+                input_frame = prepare_input_frame(frame_bgr, args.mirror_input)
                 now = time.perf_counter()
-                pose_frame = detector.detect(frame_bgr, now, frame_id)
+                pose_frame = detector.detect(input_frame, now, frame_id)
                 frame_id += 1
                 frames.append(pose_frame)
 
-                display = draw_pose(frame_bgr, pose_frame)
-                if args.mirror_display:
-                    display = cv2.flip(display, 1)
+                display = make_display(
+                    input_frame, pose_frame, args.mirror_input, args.mirror_display
+                )
                 draw_text(display, [
                     "GO!",
                     f"Recording {time.perf_counter() - record_start:.2f}/{args.record_seconds:.2f}s",
@@ -176,6 +202,7 @@ def main() -> None:
                 "hand": args.hand,
                 "record_seconds": args.record_seconds,
                 "camera_index": args.camera_index,
+                "mirror_input": args.mirror_input,
                 "created_unix": time.time(),
                 "valid_frames": valid,
                 "total_frames": len(frames),

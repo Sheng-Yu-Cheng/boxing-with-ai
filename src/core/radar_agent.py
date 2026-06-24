@@ -108,6 +108,8 @@ class RadarConfig:
     # Burst detection thresholds
     burst_snr_min_db: float = 8.0
     burst_snr_full_score_db: float = 25.0
+    punch_min_valid_velocity_mps: float = 3.0
+    punch_full_scale_velocity_mps: float = 8.0
 
     # Intensity normalization for game score
     normal_punch_velocity_mps: float = 2.0
@@ -118,6 +120,8 @@ class RadarConfig:
 
     # Console logging
     health_report_interval_s: float = 2.0
+    debug: bool = False
+    debug_top_candidates: int = 5
 
     @property
     def chirp_period_s(self) -> float:
@@ -194,6 +198,7 @@ class RadarBurstEvent:
     burst_frames: int
 
     reason: str
+    top_candidates: list[dict] = field(default_factory=list)
 
 
 @dataclass
@@ -540,7 +545,7 @@ class RadarAgent:
         if len(v_idx) == 0:
             return self._invalid_burst(t_start, t_end, "empty_velocity_roi")
 
-        best = None
+        candidates = []
         burst_frames = 0
         noise_db_values = []
 
@@ -555,31 +560,80 @@ class RadarAgent:
             noise_db = self._pow_to_db(noise)
             noise_db_values.append(noise_db)
 
-            flat_idx = int(np.argmax(roi))
-            rr_local, vv_local = np.unravel_index(flat_idx, roi.shape)
+            frame_has_burst = False
+            for rr_local, vv_local in np.ndindex(roi.shape):
+                power_db = float(self._pow_to_db(float(roi[rr_local, vv_local]) + 1e-12))
+                snr_db = power_db - noise_db
+                rr = int(r_idx[rr_local])
+                vv = int(v_idx[vv_local])
+                velocity = float(self.velocity_axis_mps[vv])
+                abs_velocity = abs(velocity)
 
-            peak_power = float(roi[rr_local, vv_local]) + 1e-12
-            peak_db = self._pow_to_db(peak_power)
-            snr_db = peak_db - noise_db
+                snr_score = float(np.clip(
+                    (snr_db - self.cfg.burst_snr_min_db)
+                    / max(
+                        self.cfg.burst_snr_full_score_db - self.cfg.burst_snr_min_db,
+                        1e-6,
+                    ),
+                    0.0,
+                    1.0,
+                ))
+                velocity_weight = float(np.clip(
+                    (abs_velocity - min_v)
+                    / max(self.cfg.punch_full_scale_velocity_mps - min_v, 1e-6),
+                    0.0,
+                    1.0,
+                ))
+                intensity_score = float(np.clip(
+                    (abs_velocity - self.cfg.normal_punch_velocity_mps)
+                    / max(
+                        self.cfg.critical_punch_velocity_mps
+                        - self.cfg.normal_punch_velocity_mps,
+                        1e-6,
+                    ),
+                    0.0,
+                    1.0,
+                ))
+                score = snr_score * velocity_weight
 
-            if snr_db >= self.cfg.burst_snr_min_db:
+                if (
+                    snr_db >= self.cfg.burst_snr_min_db
+                    and abs_velocity >= self.cfg.punch_min_valid_velocity_mps
+                ):
+                    frame_has_burst = True
+
+                candidates.append({
+                    "timestamp": float(f.timestamp),
+                    "range_m": float(self.range_axis_m[rr]),
+                    "velocity_mps": velocity,
+                    "abs_velocity_mps": abs_velocity,
+                    "power_db": power_db,
+                    "noise_floor_db": float(noise_db),
+                    "snr_db": float(snr_db),
+                    "snr_score": snr_score,
+                    "velocity_weight": velocity_weight,
+                    "intensity_score": intensity_score,
+                    "score": float(score),
+                })
+
+            if frame_has_burst:
                 burst_frames += 1
 
-            rr = int(r_idx[rr_local])
-            vv = int(v_idx[vv_local])
+        candidates.sort(key=lambda c: (c["score"], c["snr_db"]), reverse=True)
+        top_candidates = candidates[:max(1, int(self.cfg.debug_top_candidates))]
+        best = top_candidates[0] if top_candidates else None
 
-            cand = {
-                "timestamp": f.timestamp,
-                "peak_velocity_mps": float(self.velocity_axis_mps[vv]),
-                "abs_peak_velocity_mps": float(abs(self.velocity_axis_mps[vv])),
-                "peak_range_m": float(self.range_axis_m[rr]),
-                "peak_power_db": peak_db,
-                "noise_floor_db": noise_db,
-                "snr_db": snr_db,
-            }
-
-            if best is None or cand["snr_db"] > best["snr_db"]:
-                best = cand
+        if self.cfg.debug:
+            print("[RadarAgent] top burst candidates:")
+            for index, candidate in enumerate(top_candidates, 1):
+                print(
+                    f"  #{index} range={candidate['range_m']:.2f}m "
+                    f"v={candidate['velocity_mps']:+.2f}m/s "
+                    f"|v|={candidate['abs_velocity_mps']:.2f}m/s "
+                    f"snr={candidate['snr_db']:.1f}dB "
+                    f"intensity={candidate['intensity_score']:.2f} "
+                    f"score={candidate['score']:.3f}"
+                )
 
         if best is None:
             return RadarBurstEvent(
@@ -603,22 +657,19 @@ class RadarAgent:
             )
 
         snr = best["snr_db"]
-        valid = snr >= self.cfg.burst_snr_min_db
+        abs_v = best["abs_velocity_mps"]
+        if abs_v < self.cfg.punch_min_valid_velocity_mps:
+            valid = False
+            reason = "velocity_too_low_for_punch"
+        elif snr < self.cfg.burst_snr_min_db:
+            valid = False
+            reason = "peak_below_snr_threshold"
+        else:
+            valid = True
+            reason = "burst_found"
 
-        burst_score = np.clip(
-            (snr - self.cfg.burst_snr_min_db)
-            / max(self.cfg.burst_snr_full_score_db - self.cfg.burst_snr_min_db, 1e-6),
-            0.0,
-            1.0,
-        )
-
-        abs_v = best["abs_peak_velocity_mps"]
-        intensity_score = np.clip(
-            (abs_v - self.cfg.normal_punch_velocity_mps)
-            / max(self.cfg.critical_punch_velocity_mps - self.cfg.normal_punch_velocity_mps, 1e-6),
-            0.0,
-            1.0,
-        )
+        burst_score = float(best["score"])
+        intensity_score = float(best["intensity_score"])
 
         duration_score = np.clip(burst_frames / 3.0, 0.0, 1.0)
         confidence = float(np.clip(0.70 * burst_score + 0.30 * duration_score, 0.0, 1.0))
@@ -628,19 +679,20 @@ class RadarAgent:
             timestamp=best["timestamp"] if valid else None,
             t_start=t_start,
             t_end=t_end,
-            peak_velocity_mps=best["peak_velocity_mps"] if valid else None,
-            abs_peak_velocity_mps=best["abs_peak_velocity_mps"] if valid else None,
-            peak_range_m=best["peak_range_m"] if valid else None,
-            peak_power_db=best["peak_power_db"] if valid else None,
+            peak_velocity_mps=best["velocity_mps"],
+            abs_peak_velocity_mps=best["abs_velocity_mps"],
+            peak_range_m=best["range_m"],
+            peak_power_db=best["power_db"],
             noise_floor_db=best["noise_floor_db"],
-            snr_db=best["snr_db"] if valid else None,
+            snr_db=best["snr_db"],
             burst_score=float(burst_score if valid else 0.0),
             intensity_score=float(intensity_score if valid else 0.0),
             confidence=confidence if valid else 0.0,
             frames_used=len(frames),
             valid_frames_used=len(valid_frames),
             burst_frames=burst_frames,
-            reason="burst_found" if valid else "peak_below_snr_threshold",
+            reason=reason,
+            top_candidates=top_candidates,
         )
 
         with self._lock:
@@ -1319,6 +1371,7 @@ def main() -> None:
         player_range_min_m=args.range_min,
         player_range_max_m=args.range_max,
         burst_snr_min_db=args.packet_snr_db,
+        debug=args.plot,
     )
 
     agent = RadarAgent(cfg)

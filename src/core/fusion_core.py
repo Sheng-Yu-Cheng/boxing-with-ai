@@ -468,6 +468,19 @@ class FusionCore:
             fused.radar_reason = str(_get(burst, "reason", "radar_invalid"))
             return fused
 
+        if radar_intensity <= 0.05:
+            fused = self._fuse_camera_only(
+                ev,
+                source="vision_only_low_radar_intensity",
+                reason="radar valid but intensity was too low; used camera fallback",
+            )
+            fused.radar_reason = "low_radar_intensity"
+            fused.radar_velocity_mps = _get(burst, "peak_velocity_mps", None)
+            fused.radar_abs_velocity_mps = _get(burst, "abs_peak_velocity_mps", None)
+            fused.radar_snr_db = _get(burst, "snr_db", None)
+            fused.radar_peak_range_m = _get(burst, "peak_range_m", None)
+            return fused
+
         final_conf = _clip01(
             self.cfg.vision_weight * vision_conf
             + self.cfg.radar_weight * radar_conf
@@ -521,11 +534,33 @@ class FusionCore:
             self._queue.put_nowait(fused)
 
         if self.cfg.verbose:
+            radar_details = f" radar_reason={fused.radar_reason}"
+            if fused.radar_valid:
+                snr = (
+                    f"{fused.radar_snr_db:.1f}dB"
+                    if fused.radar_snr_db is not None
+                    else "-"
+                )
+                peak_range = (
+                    f"{fused.radar_peak_range_m:.2f}m"
+                    if fused.radar_peak_range_m is not None
+                    else "-"
+                )
+                if fused.radar_velocity_mps is None:
+                    radar_details = " radar_v=- radar_speed=-"
+                else:
+                    radar_details = (
+                        f" radar_v={fused.radar_velocity_mps:+.2f}m/s"
+                        f" radar_speed={abs(fused.radar_velocity_mps):.2f}m/s"
+                    )
+                radar_details += f" radar_snr={snr} radar_range={peak_range}"
             print(
                 f"[FusionCore] fused action={fused.action_type} "
                 f"source={fused.source} conf={fused.final_confidence:.2f} "
                 f"intensity={fused.intensity_score:.2f} "
+                f"damage_scale={fused.damage_scale:.2f} "
                 f"radar_valid={fused.radar_valid}"
+                f"{radar_details}"
             )
 
 

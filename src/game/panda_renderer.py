@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import math
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, TYPE_CHECKING
@@ -33,6 +34,13 @@ from panda3d.core import (
 from .events import RenderCommand, keyboard_event
 from .game_core import GameCore
 from .input_sources import KeyboardInputBuffer, build_fusion_input_source
+
+try:
+    import cv2
+except Exception:
+    cv2 = None
+
+from core.rv_map_debug import analyze_recent_rv, make_heatmap_image
 
 
 SCENE_RESIZE = 0.11
@@ -277,11 +285,11 @@ class PlayerHandsController:
         """Drive glove visuals from the continuous VisionAgent pose stream."""
         del dt  # Reserved for time-based smoothing/tuning later.
 
-        def target_for_hand(pose_hand, idle: Vec3) -> Vec3:
+        def target_for_hand(pose_hand, idle: Vec3, outward: float) -> Vec3:
             if not pose_state.pose_detected or not pose_hand.detected:
                 return idle
             return Vec3(
-                pose_hand.x * self.args.pose_scale_x,
+                pose_hand.x * self.args.pose_scale_x + outward,
                 self.args.hand_y + pose_hand.y * self.args.pose_depth_scale,
                 pose_hand.z * self.args.pose_scale_z + self.args.pose_z_offset,
             )
@@ -289,12 +297,20 @@ class PlayerHandsController:
         alpha = max(0.0, min(1.0, float(self.args.pose_smoothing_alpha)))
         self._smooth_set_pos(
             self.right_glove,
-            target_for_hand(pose_state.right_hand, self.idle_right_pos),
+            target_for_hand(
+                pose_state.right_hand,
+                self.idle_right_pos,
+                self.args.pose_hand_spacing,
+            ),
             alpha,
         )
         self._smooth_set_pos(
             self.left_glove,
-            target_for_hand(pose_state.left_hand, self.idle_left_pos),
+            target_for_hand(
+                pose_state.left_hand,
+                self.idle_left_pos,
+                -self.args.pose_hand_spacing,
+            ),
             alpha,
         )
 
@@ -330,12 +346,16 @@ class RadarBoxGameApp(ShowBase):
         self.keyboard = KeyboardInputBuffer()
         self.fusion_input = None
         self.vision_agent = None
+        self.radar_agent = None
         self.sensor_objects = []
         self.pose_control_enabled = (
             args.pose_control
             if getattr(args, "pose_control", None) is not None
             else args.input in ("fusion", "hybrid")
         )
+        self.debug_enabled = bool(args.debug)
+        self._last_rv_debug_update = 0.0
+        self._latest_rv_debug_image = None
         self.scene_path = resolve_path(args.scene)
         self.opponent_path = resolve_path(args.opponent)
         self.glove_path = resolve_path(args.glove)
@@ -402,6 +422,7 @@ class RadarBoxGameApp(ShowBase):
         try:
             self.fusion_input, self.sensor_objects = build_fusion_input_source(self.args)
             self.vision_agent = self.fusion_input.vision_agent
+            self.radar_agent = self.fusion_input.radar_agent
             self.fusion_input.start()
             print("[Game] Fusion input started")
         except Exception as e:
@@ -410,6 +431,7 @@ class RadarBoxGameApp(ShowBase):
             print(f"[Game] Fusion input failed; continuing with keyboard only: {type(e).__name__}: {e}")
             self.fusion_input = None
             self.vision_agent = None
+            self.radar_agent = None
 
     def _setup_ui(self):
         help_text = (
@@ -439,6 +461,8 @@ class RadarBoxGameApp(ShowBase):
     def quit(self):
         if self.fusion_input is not None:
             self.fusion_input.stop()
+        if cv2 is not None:
+            cv2.destroyAllWindows()
         sys.exit()
 
     def reset_game(self):
@@ -487,6 +511,45 @@ class RadarBoxGameApp(ShowBase):
         )
         self.action_text.setText(f"Action: {s.last_action}    Source: {s.last_source}")
 
+    def _update_debug_windows(self) -> None:
+        if not self.debug_enabled or cv2 is None:
+            return
+
+        try:
+            vision_image = None
+            if self.vision_agent is not None:
+                vision_image = self.vision_agent.get_latest_debug_image()
+            if vision_image is not None:
+                cv2.imshow("RadarBox Debug - Vision", vision_image)
+
+            now = time.perf_counter()
+            if self.radar_agent is not None and (
+                self._latest_rv_debug_image is None
+                or now - self._last_rv_debug_update >= self.args.debug_rv_period
+            ):
+                self._last_rv_debug_update = now
+                result = analyze_recent_rv(
+                    self.radar_agent,
+                    window_s=self.args.debug_rv_window_s,
+                    range_min=self.args.debug_rv_range_min,
+                    range_max=self.args.debug_rv_range_max,
+                    min_abs_velocity=self.args.debug_rv_min_abs_velocity,
+                    max_abs_velocity=self.args.debug_rv_max_abs_velocity,
+                    direction=self.args.debug_rv_direction,
+                    velocity_strong=self.args.debug_rv_velocity_strong,
+                )
+                health = self.radar_agent.get_health()
+                result["radar_health"] = getattr(health, "status", "UNKNOWN")
+                self._latest_rv_debug_image = make_heatmap_image(result, cv2)
+            if self._latest_rv_debug_image is not None:
+                cv2.imshow("RadarBox Debug - Recent RV Map", self._latest_rv_debug_image)
+
+            if cv2.waitKey(1) & 0xFF == ord("q"):
+                self.quit()
+        except Exception as exc:
+            print(f"[Game] debug windows disabled: {type(exc).__name__}: {exc}")
+            self.debug_enabled = False
+
     def _update(self, task):
         dt = self.clock.getDt()
         self._consume_events()
@@ -503,6 +566,7 @@ class RadarBoxGameApp(ShowBase):
         else:
             self.hands.update(dt)
         self._update_ui()
+        self._update_debug_windows()
         return task.cont
 
 
@@ -513,6 +577,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--glove", default="assets/boxing_glove.glb")
     parser.add_argument("--glove-texture", default="assets/boxing_glove.png")
     parser.add_argument("--input", choices=["keyboard", "fusion", "hybrid"], default="keyboard")
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="show Vision and recent RV-map windows beside the game (fusion/hybrid only)",
+    )
     parser.add_argument("--fusion-module", default="core.fusion_core")
     parser.add_argument("--vision-module", default="core.vision_agent")
     parser.add_argument("--vision-class", default=None)
@@ -524,6 +593,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--camera-index", type=int, default=0)
     parser.add_argument("--vision-debug", action="store_true")
     parser.add_argument("--active-hand", default="right")
+    mirror = parser.add_mutually_exclusive_group()
+    mirror.add_argument("--mirror-input", dest="mirror_input", action="store_true")
+    mirror.add_argument("--no-mirror-input", dest="mirror_input", action="store_false")
+    parser.set_defaults(mirror_input=True)
     parser.add_argument("--confidence-threshold", type=float, default=0.60)
     pose_control = parser.add_mutually_exclusive_group()
     pose_control.add_argument("--pose-control", dest="pose_control", action="store_true")
@@ -534,9 +607,28 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--pose-depth-scale", type=float, default=0.80)
     parser.add_argument("--pose-z-offset", type=float, default=-0.35)
     parser.add_argument("--pose-smoothing-alpha", type=float, default=0.35)
+    parser.add_argument(
+        "--pose-hand-spacing",
+        type=float,
+        default=0.12,
+        help="extra outward offset for each pose-controlled glove",
+    )
     parser.add_argument("--radar-pc-ip", default="192.168.33.30")
+    parser.add_argument("--radar-dca-ip", default="192.168.33.180")
     parser.add_argument("--radar-data-port", type=int, default=4098)
     parser.add_argument("--radar-min-abs-velocity", type=float, default=2.0)
+    parser.add_argument("--debug-rv-window-s", type=float, default=5.0)
+    parser.add_argument("--debug-rv-period", type=float, default=0.25)
+    parser.add_argument("--debug-rv-range-min", type=float, default=0.0)
+    parser.add_argument("--debug-rv-range-max", type=float, default=3.0)
+    parser.add_argument("--debug-rv-min-abs-velocity", type=float, default=2.0)
+    parser.add_argument("--debug-rv-max-abs-velocity", type=float, default=15.5)
+    parser.add_argument(
+        "--debug-rv-direction",
+        choices=["negative", "positive", "both"],
+        default="negative",
+    )
+    parser.add_argument("--debug-rv-velocity-strong", type=float, default=8.0)
     parser.add_argument("--require-radar-for-straight", action="store_true")
     parser.add_argument("--fusion-verbose", action="store_true")
     parser.add_argument("--width", type=int, default=1280)
@@ -560,7 +652,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--glove-roll", type=float, default=0.0)
     parser.add_argument("--no-mirror-left-glove", dest="mirror_left_glove", action="store_false")
     parser.set_defaults(mirror_left_glove=True)
-    parser.add_argument("--hand-x", type=float, default=0.42)
+    parser.add_argument("--hand-x", type=float, default=0.52)
     parser.add_argument("--hand-y", type=float, default=1.25)
     parser.add_argument("--hand-z", type=float, default=-0.45)
     parser.add_argument("--straight-depth", type=float, default=1.05)
@@ -570,6 +662,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 
 def main():
-    args = build_arg_parser().parse_args()
+    parser = build_arg_parser()
+    args = parser.parse_args()
+    if args.debug:
+        if args.input not in ("fusion", "hybrid"):
+            parser.error("--debug requires --input fusion or --input hybrid")
+        args.enable_radar = True
+        args.vision_debug = True
+        args.fusion_verbose = True
+        print("[Game] --debug enabled: radar input + Vision/RV windows")
     app = RadarBoxGameApp(args)
     app.run()

@@ -100,6 +100,7 @@ class TrajectoryVisionConfig:
     height: int = 480
     fps: int = 30
     active_hand: str = "right"  # right / left
+    mirror_input: bool = True
 
     pre_seconds: float = 0.15
     min_segment_seconds: float = 0.25
@@ -219,6 +220,9 @@ class VisionAgent:
             if not ok:
                 time.sleep(0.01)
                 continue
+
+            if self.cfg.mirror_input:
+                frame_bgr = cv2.flip(frame_bgr, 1)
 
             now = time.perf_counter()
             pose_frame = self.detector.detect(frame_bgr, now, self._frame_id)
@@ -425,6 +429,7 @@ class VisionAgent:
         cv2.putText(img, f"Hand: {self.cfg.active_hand}  speed={speed:.2f}", (20, 68), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255,255,255), 2)
         cv2.putText(img, f"Pred: {self._latest_prediction}  conf={self._latest_confidence:.2f}", (20, 100), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0,255,255), 2)
         cv2.putText(img, f"Status: {self._latest_status}", (20, 132), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255,255,255), 2)
+        cv2.putText(img, f"Mirrored: {'yes' if self.cfg.mirror_input else 'no'}", (20, 164), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255,255,255), 2)
         return img
 
 
@@ -448,6 +453,10 @@ def main():
     parser.add_argument("--model-path", default="models/pose_landmarker_lite.task")
     parser.add_argument("--camera-index", type=int, default=0)
     parser.add_argument("--active-hand", choices=["left", "right"], default="right")
+    mirror = parser.add_mutually_exclusive_group()
+    mirror.add_argument("--mirror-input", dest="mirror_input", action="store_true")
+    mirror.add_argument("--no-mirror-input", dest="mirror_input", action="store_false")
+    parser.set_defaults(mirror_input=True)
     parser.add_argument("--debug", action="store_true")
     parser.add_argument("--motion-start-speed", type=float, default=1.00)
     parser.add_argument("--motion-end-speed", type=float, default=0.45)
@@ -460,6 +469,7 @@ def main():
         model_path=args.model_path,
         camera_index=args.camera_index,
         active_hand=args.active_hand,
+        mirror_input=args.mirror_input,
         motion_start_speed=args.motion_start_speed,
         motion_end_speed=args.motion_end_speed,
         confidence_threshold=args.confidence_threshold,

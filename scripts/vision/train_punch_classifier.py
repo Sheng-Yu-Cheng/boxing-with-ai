@@ -6,7 +6,7 @@ Train a small trajectory classifier from MediaPipe punch segments.
 
 Example:
 
-    python .\src\train_punch_classifier.py `
+    python .\scripts\vision\train_punch_classifier.py `
       --dataset .\data\punch_dataset `
       --out .\models\punch_classifier.joblib `
       --hand right

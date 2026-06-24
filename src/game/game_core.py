@@ -128,9 +128,19 @@ class GameCore:
         conf = max(0.20, min(1.0, float(ev.confidence)))
 
         # Radar/vision intensity scaling. FusionCore uses damage_scale 0~1.
-        # Keep a floor so camera-only hook/uppercut still feels playable.
-        intensity = max(0.25, min(1.0, float(ev.damage_scale)))
-        damage_float = base * conf * (0.65 + 0.75 * intensity)
+        # Preserve the full radar range so slow and fast punches feel distinct;
+        # camera-only actions retain a floor so they remain playable.
+        raw_intensity = max(0.0, min(1.0, float(ev.damage_scale)))
+        intensity = raw_intensity if ev.radar_valid else max(0.25, raw_intensity)
+        # Make Doppler speed materially visible in the demo. Radar intensity is
+        # normalized from punch velocity by RadarAgent; a valid fast punch can
+        # now reach a 2.40x multiplier, while camera-only actions keep the
+        # original, more conservative curve.
+        if ev.radar_valid:
+            damage_multiplier = 0.65 + 1.75 * intensity
+        else:
+            damage_multiplier = 0.65 + 0.75 * intensity
+        damage_float = base * conf * damage_multiplier
 
         if self.state.opponent_blocking:
             damage = max(1, int(round(damage_float * 0.22)))
@@ -149,7 +159,8 @@ class GameCore:
         self.state.last_source = ev.source
         self.state.last_action = (
             f"{hand}_{kind} -> {outcome} ({damage}) "
-            f"conf={ev.confidence:.2f} intensity={ev.intensity_score:.2f}"
+            f"conf={ev.confidence:.2f} intensity={ev.intensity_score:.2f} "
+            f"x{damage_multiplier:.2f}"
         )
 
         if ev.radar_abs_velocity_mps is not None:

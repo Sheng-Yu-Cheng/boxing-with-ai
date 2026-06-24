@@ -123,8 +123,11 @@ def _construct_agent(module, cls, kwargs: dict[str, Any]):
         and p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD, p.KEYWORD_ONLY)
     ]
 
-    # Handles VisionAgent(config: TrajectoryVisionConfig) and RadarAgent(config: RadarConfig).
-    if len(required) == 1 and (required[0] == "config" or required[0] not in clean):
+    # Handles both required and optional config-style constructors, including
+    # VisionAgent(config: TrajectoryVisionConfig) and RadarAgent(config=None).
+    if "config" in sig.parameters or (
+        len(required) == 1 and required[0] not in clean
+    ):
         config_cls = _find_config_class(module, cls)
         if config_cls is not None:
             config = _build_config(config_cls, clean)
@@ -174,6 +177,7 @@ def build_fusion_input_source(args) -> tuple[FusionInputSource, list[Any]]:
         "model_path": args.pose_model,
         "camera_index": args.camera_index,
         "active_hand": args.active_hand,
+        "mirror_input": getattr(args, "mirror_input", False),
         "confidence_threshold": args.confidence_threshold,
         # Optional future names
         "debug": args.vision_debug,
@@ -190,7 +194,15 @@ def build_fusion_input_source(args) -> tuple[FusionInputSource, list[Any]]:
         )
         radar_kwargs = {
             "pc_ip": args.radar_pc_ip,
+            "dca_ip": args.radar_dca_ip,
             "data_port": args.radar_data_port,
+            "debug": bool(getattr(args, "debug", False)),
+            "radar_buffer_seconds": max(
+                2.0,
+                float(getattr(args, "debug_rv_window_s", 5.0)) + 1.0
+                if getattr(args, "debug", False)
+                else 2.0,
+            ),
         }
         radar_agent = _construct_agent(radar_mod, radar_cls, radar_kwargs)
 

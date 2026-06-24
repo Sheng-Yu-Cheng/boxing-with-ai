@@ -176,6 +176,10 @@ def main():
     parser.add_argument("--model-path", default="models/pose_landmarker_lite.task")
     parser.add_argument("--camera-index", type=int, default=0)
     parser.add_argument("--active-hand", choices=["left", "right"], default="right")
+    mirror = parser.add_mutually_exclusive_group()
+    mirror.add_argument("--mirror-input", dest="mirror_input", action="store_true")
+    mirror.add_argument("--no-mirror-input", dest="mirror_input", action="store_false")
+    parser.set_defaults(mirror_input=True)
     parser.add_argument("--confidence-threshold", type=float, default=0.60)
     parser.add_argument("--motion-start-speed", type=float, default=1.00)
     parser.add_argument("--motion-end-speed", type=float, default=0.45)
@@ -197,6 +201,7 @@ def main():
     parser.add_argument("--radar-range-max", type=float, default=2.5)
     parser.add_argument("--radar-min-abs-velocity", type=float, default=0.5)
     parser.add_argument("--radar-background-frames", type=int, default=0)
+    parser.add_argument("--radar-debug", action="store_true")
 
     # FusionCore args.
     parser.add_argument("--require-radar-for-straight", action="store_true")
@@ -226,6 +231,7 @@ def main():
         model_path=args.model_path,
         camera_index=args.camera_index,
         active_hand=args.active_hand,
+        mirror_input=args.mirror_input,
         motion_start_speed=args.motion_start_speed,
         motion_end_speed=args.motion_end_speed,
         confidence_threshold=args.confidence_threshold,
@@ -258,6 +264,7 @@ def main():
                 player_range_min=args.radar_range_min,
                 player_range_max=args.radar_range_max,
                 background_calibration_frames=args.radar_background_frames,
+                debug=args.radar_debug,
             )
             radar = RadarAgent(radar_cfg)
 

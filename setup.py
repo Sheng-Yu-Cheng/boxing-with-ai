@@ -8,6 +8,7 @@ setup(
     py_modules=[
         "core.punch_vision_common",
         "core.radar_agent",
+        "core.rv_map_debug",
         "core.vision_agent",
         "core.fusion_core",
         "game.events", 
