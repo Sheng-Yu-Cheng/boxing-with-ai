@@ -39,9 +39,9 @@ python .\scripts\game\run_game.py `
 ```
 
 TBD:
-1. restart game
-2. enemy AI
+1. restart game v
+2. enemy AI 
 3. 血條，不用數字
-3. frame lua, stop frame with command from python with file exchange
+3. frame lua, stop frame with command from python with file exchange v
 4. retrain classifier
-5. no-debug mode
+5. no-debug mode v

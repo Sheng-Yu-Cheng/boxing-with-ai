@@ -4,7 +4,7 @@
 -- This script DOES:
 --   1. Initialize the beam command file polling function.
 --   2. Apply the initial beam command once before StartFrame.
---   3. Start DCA1000 record to C:\temp\radar_back.bin.
+--   3. Start DCA1000 record to C:\temp\radar_back.bin whenever an active run begins.
 --   4. Keep running and watch C:\temp\radarbox_radar_state.txt.
 --   5. When state is "active", start radar frame and poll beam commands.
 --   6. When state becomes "inactive", stop radar frame and wait for the next active state.
@@ -190,6 +190,19 @@ function safe_stop_frame()
     end
 end
 
+function start_record_and_frame()
+    apply_cmd_if_changed(true)
+
+    log_msg("Start DCA1000 record: " .. ADC_OUTPUT_PATH, "yellow")
+    ar1.CaptureCardConfig_StartRecord(ADC_OUTPUT_PATH, 1)
+    RSTD.Sleep(START_RECORD_TO_START_FRAME_SLEEP_MS)
+
+    log_msg("RADAR_STATE active; Start radar frame: ar1.StartFrame()", "yellow")
+    ar1.StartFrame()
+    frame_started = true
+    RSTD.Sleep(START_FRAME_TO_POLL_SLEEP_MS)
+end
+
 function main()
     log_msg("RadarBox record + state-controlled beam poll script started", "yellow")
     log_msg("CMD_PATH=" .. CMD_PATH, "yellow")
@@ -202,12 +215,8 @@ function main()
     -- Avoid immediately stopping because of an old stop file.
     remove_file(STOP_PATH)
 
-    -- Initialize beam update function before streaming starts.
+    -- Initialize beam update function before the first active streaming run.
     apply_cmd_if_changed(true)
-
-    log_msg("Start DCA1000 record: " .. ADC_OUTPUT_PATH, "yellow")
-    ar1.CaptureCardConfig_StartRecord(ADC_OUTPUT_PATH, 1)
-    RSTD.Sleep(START_RECORD_TO_START_FRAME_SLEEP_MS)
 
     log_msg("Outer state loop entered; waiting for RADAR_STATE_PATH=active", "yellow")
 
@@ -219,13 +228,8 @@ function main()
 
         local state = read_radar_state()
         if state == "active" then
-            apply_cmd_if_changed(true)
-
             if not frame_started then
-                log_msg("RADAR_STATE active; Start radar frame: ar1.StartFrame()", "yellow")
-                ar1.StartFrame()
-                frame_started = true
-                RSTD.Sleep(START_FRAME_TO_POLL_SLEEP_MS)
+                start_record_and_frame()
             end
 
             log_msg("Beam polling loop entered", "yellow")
