@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import atexit
 import math
 import sys
 import time
@@ -26,6 +27,7 @@ from panda3d.core import (
     Filename,
     NodePath,
     TextNode,
+    TransparencyAttrib,
     Vec3,
     Vec4,
     WindowProperties,
@@ -64,6 +66,7 @@ RADAR_RANGE_MIN_M = 0.6
 RADAR_RANGE_MAX_M = 2.5
 RADAR_MARKER_Y_MIN = 0.5
 RADAR_MARKER_Y_MAX = 3.0
+RADAR_STATE_PATH = r"C:\temp\radarbox_radar_state.txt"
 
 
 def resolve_path(path_str: str, must_exist: bool = True) -> str:
@@ -396,12 +399,16 @@ class RadarBoxGameApp(ShowBase):
         self.player_motion_smoothing_alpha = 0.35
         self._radar_player_world_xy = None
         self.latest_radar_range_for_pose_m = None
+        self.round_state = "waiting_start"
+        self.round_result_message = ""
         self.scene_path = resolve_path(args.scene)
         self.opponent_path = resolve_path(args.opponent)
         self.glove_path = resolve_path(args.glove)
         self.glove_texture_path = resolve_path(args.glove_texture, must_exist=False) if args.glove_texture else None
         self.disableMouse()
         self.set_background_color(*SKY_COLOR)
+        self._write_radar_runtime_state("active")
+        atexit.register(self._write_radar_runtime_state, "inactive")
         props = WindowProperties()
         props.setTitle("RadarBox Game System")
         props.setSize(args.width, args.height)
@@ -414,10 +421,21 @@ class RadarBoxGameApp(ShowBase):
         self.opponent = OpponentController(self, self.opponent_path, args)
         self.hands = PlayerHandsController(self, self.glove_path, self.glove_texture_path, args)
         self._setup_ui()
+        self._setup_start_overlay()
+        self._show_start_overlay()
         self._setup_keys()
         if args.input in ("fusion", "hybrid"):
             self._setup_fusion_input()
         self.taskMgr.add(self._update, "game_update")
+
+    def _write_radar_runtime_state(self, state: str) -> None:
+        try:
+            path = Path(RADAR_STATE_PATH)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(f"{state}\n", encoding="ascii")
+            print(f"[Game] radar runtime state -> {state} ({path})")
+        except Exception as exc:
+            print(f"[Game] failed to write radar runtime state={state}: {type(exc).__name__}: {exc}")
 
     def _setup_camera(self):
         self.camera.setPos(0, self.args.camera_y, self.args.camera_z)
@@ -502,6 +520,61 @@ class RadarBoxGameApp(ShowBase):
         self.action_text = OnscreenText(text="", pos=(-1.32, -0.95), scale=0.045, align=TextNode.ALeft, fg=(0.75, 0.95, 1.0, 1), mayChange=True)
         self.radar_text = OnscreenText(text="", pos=(0.38, 0.92), scale=0.038, align=TextNode.ALeft, fg=(0.45, 0.75, 1.0, 1), mayChange=True)
 
+    def _setup_start_overlay(self):
+        self.start_overlay = self.aspect2d.attachNewNode("start_game_overlay")
+
+        cm = CardMaker("start_game_overlay_mask")
+        cm.setFrame(-2.0, 2.0, -1.0, 1.0)
+        mask = self.start_overlay.attachNewNode(cm.generate())
+        mask.setColor(0.08, 0.08, 0.08, 0.68)
+        mask.setTransparency(TransparencyAttrib.MAlpha)
+        mask.setBin("fixed", 20)
+        mask.setDepthTest(False)
+        mask.setDepthWrite(False)
+
+        self.overlay_result_text = OnscreenText(
+            text="",
+            parent=self.start_overlay,
+            pos=(0.0, 0.20),
+            scale=0.115,
+            align=TextNode.ACenter,
+            fg=(1.0, 0.82, 0.20, 1.0),
+            mayChange=True,
+        )
+        self.overlay_start_text = OnscreenText(
+            text="Right Straight Punch to Start Game",
+            parent=self.start_overlay,
+            pos=(0.0, 0.02),
+            scale=0.085,
+            align=TextNode.ACenter,
+            fg=(1.0, 1.0, 1.0, 1.0),
+            mayChange=True,
+        )
+        self.overlay_hint_text = OnscreenText(
+            text="Keyboard debug: press J",
+            parent=self.start_overlay,
+            pos=(0.0, -0.14),
+            scale=0.045,
+            align=TextNode.ACenter,
+            fg=(0.78, 0.90, 1.0, 1.0),
+            mayChange=True,
+        )
+        for text_node in (self.overlay_result_text, self.overlay_start_text, self.overlay_hint_text):
+            text_node.setBin("fixed", 30)
+            text_node.setDepthTest(False)
+            text_node.setDepthWrite(False)
+
+    def _show_start_overlay(self, result_message: str = ""):
+        self.round_state = "waiting_start"
+        self.round_result_message = result_message
+        self.overlay_result_text.setText(result_message)
+        self.start_overlay.show()
+
+    def _hide_start_overlay(self):
+        self.round_state = "playing"
+        self.round_result_message = ""
+        self.start_overlay.hide()
+
     def _setup_keys(self):
         self.accept("escape", self.quit)
         self.accept("r", self.reset_game)
@@ -517,17 +590,44 @@ class RadarBoxGameApp(ShowBase):
         self.accept("t", lambda: self.keyboard.push(keyboard_event("left_uppercut", hand="left")))
 
     def quit(self):
-        if self.fusion_input is not None:
-            self.fusion_input.stop()
-        if cv2 is not None:
-            cv2.destroyAllWindows()
-        sys.exit()
+        try:
+            self._write_radar_runtime_state("inactive")
+        finally:
+            if self.fusion_input is not None:
+                self.fusion_input.stop()
+            if cv2 is not None:
+                cv2.destroyAllWindows()
+            sys.exit()
 
     def reset_game(self):
         for cmd in self.game_core.reset():
             self.apply_command(cmd)
         self.hands.reset()
         self.opponent.reset()
+
+    def _is_start_punch_event(self, ev) -> bool:
+        action_type = str(getattr(ev, "action_type", "")).lower()
+        hand = str(getattr(ev, "hand", "")).lower()
+        return action_type == "right_straight" or (action_type == "straight" and hand == "right")
+
+    def _start_round(self):
+        self.reset_game()
+        self._hide_start_overlay()
+        print("[Game] round started")
+
+    def _end_round(self, result_message: str):
+        self.reset_game()
+        self._show_start_overlay(result_message)
+        print(f"[Game] round ended: {result_message}")
+
+    def _check_round_over(self):
+        if self.round_state != "playing":
+            return
+        s = self.game_core.state
+        if s.opponent_hp <= 0:
+            self._end_round("You Win")
+        elif s.player_hp <= 0:
+            self._end_round("You Have Been Defeated")
 
     def toggle_opponent_block(self):
         for cmd in self.game_core.toggle_opponent_block():
@@ -556,10 +656,21 @@ class RadarBoxGameApp(ShowBase):
         events = self.keyboard.poll()
         if self.fusion_input is not None:
             events.extend(self.fusion_input.poll())
+
+        if self.round_state == "waiting_start":
+            for ev in events:
+                if self._is_start_punch_event(ev):
+                    self._start_round()
+                    return
+            return
+
         for ev in events:
             cmds = self.game_core.handle_player_event(ev)
             for cmd in cmds:
                 self.apply_command(cmd)
+            self._check_round_over()
+            if self.round_state != "playing":
+                return
 
     def _update_ui(self):
         s = self.game_core.state
