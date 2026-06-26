@@ -60,6 +60,11 @@ GROUND_COLOR = (0.22, 0.60, 0.22, 1.0)
 GROUND_Z = -2.0
 GROUND_SIZE = 80.0
 
+RADAR_RANGE_MIN_M = 0.6
+RADAR_RANGE_MAX_M = 2.5
+RADAR_MARKER_Y_MIN = 0.5
+RADAR_MARKER_Y_MAX = 3.0
+
 
 def resolve_path(path_str: str, must_exist: bool = True) -> str:
     p = Path(path_str)
@@ -77,6 +82,10 @@ def resolve_path(path_str: str, must_exist: bool = True) -> str:
 
 def norm_name(s: str) -> str:
     return s.lower().replace("_", " ").replace("-", " ").replace(".", " ").replace("|", " ").strip()
+
+
+def clamp(value: float, lo: float, hi: float) -> float:
+    return max(lo, min(hi, value))
 
 
 def find_anim(available: list[str], candidates: list[str]) -> str | None:
@@ -193,6 +202,7 @@ class PlayerHandsController:
         self.idle_left_pos = Vec3(-args.hand_x, args.hand_y, args.hand_z)
         self.guard_right_pos = Vec3(0.30, args.hand_y + 0.10, -0.12)
         self.guard_left_pos = Vec3(-0.30, args.hand_y + 0.10, -0.12)
+        self.last_pose_x_range_gain = 1.0
         self.reset()
 
     def _apply_texture_if_available(self, model: NodePath, texture_path: Optional[str]) -> None:
@@ -281,38 +291,66 @@ class PlayerHandsController:
         cur = node.getPos()
         node.setPos(cur + (target - cur) * alpha)
 
-    def update_from_pose_state(self, pose_state: "PlayerPoseState", dt: float) -> None:
+    def _pose_x_range_gain(self, radar_range_m: Optional[float]) -> float:
+        gain = 1.0
+        if (
+            self.args.pose_use_radar_range_x
+            and radar_range_m is not None
+            and radar_range_m > 0.0
+            and self.args.pose_x_reference_range_m > 0.0
+        ):
+            gain = float(radar_range_m) / float(self.args.pose_x_reference_range_m)
+            gain = clamp(
+                gain,
+                float(self.args.pose_x_range_gain_min),
+                float(self.args.pose_x_range_gain_max),
+            )
+        self.last_pose_x_range_gain = gain
+        return gain
+
+    def update_from_pose_state(self, pose_state: "PlayerPoseState", dt: float, radar_range_m: Optional[float] = None) -> None:
         """Drive glove visuals from the continuous VisionAgent pose stream."""
         del dt  # Reserved for time-based smoothing/tuning later.
+        range_gain = self._pose_x_range_gain(radar_range_m)
 
         def target_for_hand(pose_hand, idle: Vec3, outward: float) -> Vec3:
             if not pose_state.pose_detected or not pose_hand.detected:
                 return idle
             return Vec3(
-                pose_hand.x * self.args.pose_scale_x + outward,
+                pose_hand.x * self.args.pose_scale_x * range_gain + outward,
                 self.args.hand_y + pose_hand.y * self.args.pose_depth_scale,
                 pose_hand.z * self.args.pose_scale_z + self.args.pose_z_offset,
             )
 
         alpha = max(0.0, min(1.0, float(self.args.pose_smoothing_alpha)))
-        self._smooth_set_pos(
-            self.right_glove,
-            target_for_hand(
-                pose_state.right_hand,
-                self.idle_right_pos,
-                self.args.pose_hand_spacing,
-            ),
-            alpha,
+        right_target = target_for_hand(
+            pose_state.right_hand,
+            self.idle_right_pos,
+            self.args.pose_hand_spacing,
         )
-        self._smooth_set_pos(
-            self.left_glove,
-            target_for_hand(
-                pose_state.left_hand,
-                self.idle_left_pos,
-                -self.args.pose_hand_spacing,
-            ),
-            alpha,
+        left_target = target_for_hand(
+            pose_state.left_hand,
+            self.idle_left_pos,
+            -self.args.pose_hand_spacing,
         )
+
+        if pose_state.pose_detected and pose_state.right_hand.detected and pose_state.left_hand.detected:
+            right_x = float(right_target.x)
+            left_x = float(left_target.x)
+            center_x = 0.5 * (right_x + left_x)
+            dx = right_x - left_x
+            if dx <= 0.0:
+                dx = float(self.args.pose_glove_min_dx)
+            dx = clamp(
+                dx,
+                float(self.args.pose_glove_min_dx),
+                float(self.args.pose_glove_max_dx),
+            )
+            right_target = Vec3(center_x + 0.5 * dx, right_target.y, right_target.z)
+            left_target = Vec3(center_x - 0.5 * dx, left_target.y, left_target.z)
+
+        self._smooth_set_pos(self.right_glove, right_target, alpha)
+        self._smooth_set_pos(self.left_glove, left_target, alpha)
 
     def update(self, dt: float):
         if self.blocking:
@@ -356,6 +394,18 @@ class RadarBoxGameApp(ShowBase):
         self.debug_enabled = bool(args.debug)
         self._last_rv_debug_update = 0.0
         self._latest_rv_debug_image = None
+        self.radar_origin_x = 0.0
+        self.radar_origin_y = 0.0
+        self.radar_origin_z = 0.0
+        self.radar_world_scale = 1.2
+        self.radar_forward_sign = -1.0
+        self.radar_theta_sign = -1.0
+        self.enable_radar_player_motion = True
+        self.player_camera_height = 1.65
+        self.player_camera_look_at_z = 1.45
+        self.player_motion_smoothing_alpha = 0.35
+        self._radar_player_world_xy = None
+        self.latest_radar_range_for_pose_m = None
         self.scene_path = resolve_path(args.scene)
         self.opponent_path = resolve_path(args.opponent)
         self.glove_path = resolve_path(args.glove)
@@ -370,6 +420,7 @@ class RadarBoxGameApp(ShowBase):
         self._setup_lights()
         self._setup_ground()
         self._load_scene()
+        self._setup_player_marker()
         self.opponent = OpponentController(self, self.opponent_path, args)
         self.hands = PlayerHandsController(self, self.glove_path, self.glove_texture_path, args)
         self._setup_ui()
@@ -418,6 +469,22 @@ class RadarBoxGameApp(ShowBase):
         self.scene_model.setScale(self.args.scene_scale)
         self.scene_model.setHpr(self.args.scene_heading, 0, 0)
 
+    def _setup_player_marker(self):
+        marker = self.loader.loadModel("models/misc/sphere")
+        if marker.isEmpty():
+            cm = CardMaker("player_marker_card")
+            cm.setFrame(-0.08, 0.08, -0.08, 0.08)
+            marker = self.render.attachNewNode(cm.generate())
+            marker.setP(-90)
+        else:
+            marker.reparentTo(self.render)
+        marker.setName("radar_player_marker")
+        marker.setScale(0.09)
+        marker.setColor(0.1, 0.35, 1.0, 1.0)
+        marker.setPos(0.0, RADAR_MARKER_Y_MIN, 0.0)
+        marker.setLightOff(1)
+        self.player_marker = marker
+
     def _setup_fusion_input(self):
         try:
             self.fusion_input, self.sensor_objects = build_fusion_input_source(self.args)
@@ -443,6 +510,7 @@ class RadarBoxGameApp(ShowBase):
         self.help_text = OnscreenText(text=help_text, pos=(-1.32, 0.93), scale=0.041, align=TextNode.ALeft, fg=(1, 1, 1, 1), mayChange=False)
         self.hp_text = OnscreenText(text="", pos=(-1.32, -0.86), scale=0.056, align=TextNode.ALeft, fg=(1, 0.9, 0.25, 1), mayChange=True)
         self.action_text = OnscreenText(text="", pos=(-1.32, -0.95), scale=0.045, align=TextNode.ALeft, fg=(0.75, 0.95, 1.0, 1), mayChange=True)
+        self.radar_text = OnscreenText(text="", pos=(0.38, 0.92), scale=0.038, align=TextNode.ALeft, fg=(0.45, 0.75, 1.0, 1), mayChange=True)
 
     def _setup_keys(self):
         self.accept("escape", self.quit)
@@ -511,6 +579,145 @@ class RadarBoxGameApp(ShowBase):
         )
         self.action_text.setText(f"Action: {s.last_action}    Source: {s.last_source}")
 
+    def _update_player_marker_from_range(self, range_m) -> None:
+        if range_m is None:
+            world_y = RADAR_MARKER_Y_MIN
+        else:
+            range_t = (
+                (float(range_m) - RADAR_RANGE_MIN_M)
+                / max(RADAR_RANGE_MAX_M - RADAR_RANGE_MIN_M, 1e-6)
+            )
+            range_t = clamp(range_t, 0.0, 1.0)
+            world_y = RADAR_MARKER_Y_MIN + range_t * (RADAR_MARKER_Y_MAX - RADAR_MARKER_Y_MIN)
+        self.player_marker.setPos(0.0, world_y, 0.0)
+
+    def _radar_polar_to_world(self, range_m: float, theta_deg: float):
+        theta = math.radians(theta_deg * self.radar_theta_sign)
+        x = self.radar_origin_x + self.radar_world_scale * range_m * math.sin(theta)
+        y = self.radar_origin_y + self.radar_forward_sign * self.radar_world_scale * range_m * math.cos(theta)
+        z = self.radar_origin_z
+        return x, y, z
+
+    def _update_player_from_tracking(self, range_m, theta_deg):
+        if range_m is None:
+            return None
+        theta = 0.0 if theta_deg is None else float(theta_deg)
+        target_x, target_y, _ = self._radar_polar_to_world(float(range_m), theta)
+
+        alpha = clamp(float(self.player_motion_smoothing_alpha), 0.0, 1.0)
+        if self._radar_player_world_xy is None:
+            current = self.camera.getPos()
+            current_x = float(current.x)
+            current_y = float(current.y)
+        else:
+            current_x, current_y = self._radar_player_world_xy
+
+        world_x = current_x + alpha * (target_x - current_x)
+        world_y = current_y + alpha * (target_y - current_y)
+        self._radar_player_world_xy = (world_x, world_y)
+
+        marker_pos = (world_x, world_y, 0.08)
+        self.player_marker.setPos(*marker_pos)
+
+        if self.enable_radar_player_motion:
+            self.camera.setPos(world_x, world_y, self.player_camera_height)
+            self.camera.lookAt(0.0, 0.0, self.player_camera_look_at_z)
+
+        return marker_pos
+
+    def update_radar_ui(self):
+        def fmt(value, suffix: str = "") -> str:
+            if value is None:
+                return "N/A"
+            try:
+                return f"{float(value):.2f}{suffix}"
+            except (TypeError, ValueError):
+                return str(value)
+
+        def fmt_beam(tracking) -> str:
+            tx0 = getattr(tracking, "beam_tx0_code", None)
+            tx1 = getattr(tracking, "beam_tx1_code", None)
+            tx2 = getattr(tracking, "beam_tx2_code", None)
+            theta = getattr(tracking, "beam_theta_deg", None)
+            if tx0 is None and tx1 is None and tx2 is None and theta is None:
+                return "N/A"
+            codes = ",".join("N/A" if x is None else str(int(x)) for x in (tx0, tx1, tx2))
+            return f"[{codes}] theta={fmt(theta, ' deg')}"
+
+        if self.radar_agent is not None and hasattr(self.radar_agent, "get_latest_tracking_state"):
+            try:
+                tracking = self.radar_agent.get_latest_tracking_state()
+            except Exception as exc:
+                self.radar_text.setText(f"Radar Tracking: state error ({type(exc).__name__})")
+                return
+
+            range_m = getattr(tracking, "range_m", None)
+            theta_smooth = getattr(tracking, "theta_smooth_deg", None)
+            velocity = getattr(tracking, "peak_velocity_mps", None)
+            player_world = None
+            if getattr(tracking, "valid", False) and range_m is not None:
+                self.latest_radar_range_for_pose_m = float(range_m)
+                player_world = self._update_player_from_tracking(range_m, theta_smooth)
+            player_x = player_world[0] if player_world is not None else None
+            player_y = player_world[1] if player_world is not None else None
+            glove_range_gain = getattr(self.hands, "last_pose_x_range_gain", 1.0)
+            self.radar_text.setText(
+                "Radar Tracking\n"
+                f"valid: {getattr(tracking, 'valid', False)}\n"
+                f"range: {fmt(range_m, ' m')}\n"
+                f"AoA raw: {fmt(getattr(tracking, 'theta_raw_deg', None), ' deg')}\n"
+                f"AoA smooth: {fmt(theta_smooth, ' deg')}\n"
+                f"SNR: {fmt(getattr(tracking, 'snr_db', None), ' dB')}\n"
+                f"velocity: {fmt(velocity, ' m/s')}\n"
+                f"Player world: x={fmt(player_x)} y={fmt(player_y)} range={fmt(range_m, ' m')} theta={fmt(theta_smooth, ' deg')}\n"
+                f"Radar origin: x={fmt(self.radar_origin_x)} y={fmt(self.radar_origin_y)} forward={fmt(self.radar_forward_sign)} theta_sign={fmt(self.radar_theta_sign)}\n"
+                f"Radar player motion: enabled={self.enable_radar_player_motion}\n"
+                f"Glove X range comp: enabled={self.args.pose_use_radar_range_x} radar={fmt(self.latest_radar_range_for_pose_m, ' m')} ref={fmt(self.args.pose_x_reference_range_m, ' m')} gain={fmt(glove_range_gain)} scale_x={fmt(self.args.pose_scale_x)} spacing={fmt(self.args.pose_hand_spacing)} dx=[{fmt(self.args.pose_glove_min_dx)},{fmt(self.args.pose_glove_max_dx)}]\n"
+                f"track: r={fmt(getattr(tracking, 'track_range_m', None), ' m')} v={fmt(getattr(tracking, 'track_velocity_mps', None), ' m/s')}\n"
+                f"bins: ({getattr(tracking, 'target_range_bin', None)}, {getattr(tracking, 'target_doppler_bin', None)}) cand={getattr(tracking, 'candidate_count', 0)}\n"
+                f"beam: {fmt_beam(tracking)}\n"
+                f"reason: {getattr(tracking, 'reason', 'unknown')}"
+            )
+            return
+
+        summary = None
+        if self.radar_agent is not None and hasattr(self.radar_agent, "get_latest_summary"):
+            try:
+                summary = self.radar_agent.get_latest_summary()
+            except Exception as exc:
+                self.radar_text.setText(f"Radar: summary error ({type(exc).__name__})")
+                return
+
+        if summary is None:
+            self.radar_text.setText(
+                "Radar\n"
+                "peak_range_m: N/A\n"
+                "peak_velocity_mps: N/A\n"
+                "snr_db: N/A\n"
+                "reason: no_radar_agent\n"
+                "AoA: N/A\n"
+                "Beam: N/A"
+            )
+            self._update_player_marker_from_range(None)
+            return
+
+        peak_range_m = getattr(summary, "peak_range_m", None)
+        peak_velocity_mps = getattr(summary, "peak_velocity_mps", None)
+        snr_db = getattr(summary, "snr_db", None)
+        reason = getattr(summary, "reason", "unknown")
+
+        self.radar_text.setText(
+            "Radar\n"
+            f"peak_range_m: {fmt(peak_range_m)}\n"
+            f"peak_velocity_mps: {fmt(peak_velocity_mps)}\n"
+            f"snr_db: {fmt(snr_db)}\n"
+            f"reason: {reason}\n"
+            "AoA: N/A\n"
+            "Beam: N/A"
+        )
+
+        self._update_player_marker_from_range(peak_range_m)
+
     def _update_debug_windows(self) -> None:
         if not self.debug_enabled or cv2 is None:
             return
@@ -562,10 +769,11 @@ class RadarBoxGameApp(ShowBase):
             pose_state = self.vision_agent.get_latest_player_pose_state()
 
         if pose_state is not None:
-            self.hands.update_from_pose_state(pose_state, dt)
+            self.hands.update_from_pose_state(pose_state, dt, radar_range_m=self.latest_radar_range_for_pose_m)
         else:
             self.hands.update(dt)
         self._update_ui()
+        self.update_radar_ui()
         self._update_debug_windows()
         return task.cont
 
@@ -608,6 +816,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--pose-z-offset", type=float, default=-0.35)
     parser.add_argument("--pose-smoothing-alpha", type=float, default=0.35)
     parser.add_argument(
+        "--pose-use-radar-range-x",
+        action="store_true",
+        help="scale MediaPipe pose hand X by latest radar range to stabilize glove spacing",
+    )
+    parser.add_argument("--pose-x-reference-range-m", type=float, default=2.0)
+    parser.add_argument("--pose-x-range-gain-min", type=float, default=0.65)
+    parser.add_argument("--pose-x-range-gain-max", type=float, default=1.6)
+    parser.add_argument("--pose-glove-min-dx", type=float, default=1.05)
+    parser.add_argument("--pose-glove-max-dx", type=float, default=1.60)
+    parser.add_argument(
         "--pose-hand-spacing",
         type=float,
         default=0.12,
@@ -617,6 +835,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--radar-dca-ip", default="192.168.33.180")
     parser.add_argument("--radar-data-port", type=int, default=4098)
     parser.add_argument("--radar-min-abs-velocity", type=float, default=2.0)
+    parser.add_argument(
+        "--enable-aoa-feedback",
+        action="store_true",
+        help="write AoA-smoothed 3Tx phase codes to the mmWave Studio beam command file",
+    )
+    parser.add_argument("--beam-cmd-file", default=r"C:\temp\radarbox_beam_cmd.txt")
+    parser.add_argument("--beam-update-interval-s", type=float, default=0.50)
+    parser.add_argument("--beam-min-confidence", type=float, default=0.20)
+    parser.add_argument("--beam-min-snr-db", type=float, default=6.0)
     parser.add_argument("--debug-rv-window-s", type=float, default=5.0)
     parser.add_argument("--debug-rv-period", type=float, default=0.25)
     parser.add_argument("--debug-rv-range-min", type=float, default=0.0)
@@ -630,6 +857,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--debug-rv-velocity-strong", type=float, default=8.0)
     parser.add_argument("--require-radar-for-straight", action="store_true")
+    parser.add_argument(
+        "--camera-only-straight-damage",
+        action="store_true",
+        help="allow straight punches to fall back to camera-only damage when radar is enabled",
+    )
     parser.add_argument("--fusion-verbose", action="store_true")
     parser.add_argument("--width", type=int, default=1280)
     parser.add_argument("--height", type=int, default=720)

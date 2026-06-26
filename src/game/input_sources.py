@@ -196,6 +196,11 @@ def build_fusion_input_source(args) -> tuple[FusionInputSource, list[Any]]:
             "pc_ip": args.radar_pc_ip,
             "dca_ip": args.radar_dca_ip,
             "data_port": args.radar_data_port,
+            "enable_aoa_feedback": bool(getattr(args, "enable_aoa_feedback", False)),
+            "beam_cmd_file": getattr(args, "beam_cmd_file", r"C:\temp\radarbox_beam_cmd.txt"),
+            "beam_update_interval_s": getattr(args, "beam_update_interval_s", 0.50),
+            "beam_min_confidence": getattr(args, "beam_min_confidence", 0.20),
+            "beam_min_snr_db": getattr(args, "beam_min_snr_db", 6.0),
             "debug": bool(getattr(args, "debug", False)),
             "radar_buffer_seconds": max(
                 2.0,
@@ -211,7 +216,10 @@ def build_fusion_input_source(args) -> tuple[FusionInputSource, list[Any]]:
 
     cfg = FusionConfig(
         radar_min_abs_velocity_mps=args.radar_min_abs_velocity,
-        require_radar_for_straight=args.require_radar_for_straight,
+        require_radar_for_straight=(
+            args.require_radar_for_straight
+            or (bool(args.enable_radar) and not bool(getattr(args, "camera_only_straight_damage", False)))
+        ),
         verbose=args.fusion_verbose,
     )
     fusion_core = FusionCore(vision_agent=vision_agent, radar_agent=radar_agent, config=cfg)

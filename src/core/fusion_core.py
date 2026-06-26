@@ -469,6 +469,11 @@ class FusionCore:
             return fused
 
         if radar_intensity <= 0.05:
+            if self.cfg.require_radar_for_straight:
+                if self.cfg.verbose:
+                    print("[FusionCore] dropped straight: radar intensity too low")
+                return None
+
             fused = self._fuse_camera_only(
                 ev,
                 source="vision_only_low_radar_intensity",

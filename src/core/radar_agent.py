@@ -49,11 +49,13 @@ Timestamp convention:
 from __future__ import annotations
 
 import argparse
+import math
 import socket
 import threading
 import time
 from collections import deque
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Optional, Literal
 
 import numpy as np
@@ -123,6 +125,43 @@ class RadarConfig:
     debug: bool = False
     debug_top_candidates: int = 5
 
+    # Continuous UI/debug tracking from 4 physical Rx phase slope.
+    # Important: this is for the current 3Tx simultaneous beamforming setup,
+    # where the decoded ADC shape remains [loop, 1, sample, 4Rx].
+    enable_rx_phase_aoa: bool = True
+    aoa_min_snr_db: float = 2.0
+    aoa_alpha: float = 0.25
+    aoa_max_update_step_deg: float = 8.0
+    aoa_max_abs_deg: float = 45.0
+    aoa_sign: float = 1.0
+    aoa_scale: float = 1.0
+    aoa_offset_deg: float = 0.0
+    rx_phase_offsets_rad: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 0.0)
+
+    tracking_range_min_m: float = 0.30
+    tracking_range_max_m: float = 3.20
+    tracking_min_abs_velocity_mps: float = 0.0
+    tracking_max_abs_velocity_mps: float = 16.0
+    tracking_enable_temporal_lock: bool = True
+    tracking_range_gate_m: float = 0.45
+    tracking_velocity_gate_mps: float = 3.0
+    tracking_theta_gate_deg: float = 35.0
+    tracking_snr_min_db: float = 6.0
+
+    tracking_score_snr_weight: float = 1.0
+    tracking_score_range_weight: float = 4.0
+    tracking_score_velocity_weight: float = 0.5
+
+    tracking_lost_timeout_s: float = 1.0
+
+    # Optional AoA feedback to mmWave Studio Lua file poller.
+    enable_aoa_feedback: bool = False
+    beam_cmd_file: str = r"C:\temp\radarbox_beam_cmd.txt"
+    beam_update_interval_s: float = 0.50
+    phase_step_deg: float = 5.625
+    beam_min_confidence: float = 0.20
+    beam_min_snr_db: float = 6.0
+
     @property
     def chirp_period_s(self) -> float:
         return self.idle_time_s + self.ramp_end_time_s
@@ -168,6 +207,7 @@ class RadarFrame:
     rd_db: np.ndarray             # [range, doppler], dB
     range_axis_m: np.ndarray
     velocity_axis_mps: np.ndarray
+    rd_complex: Optional[np.ndarray] = None  # [doppler, tx, range, rx]; tx stays 1 for 3Tx simultaneous
 
     valid: bool = True
     invalid_reason: Optional[str] = None
@@ -233,6 +273,37 @@ class RadarSummary:
     snr_db: Optional[float]
     frame_valid: bool
     reason: str
+
+
+@dataclass
+class RadarTrackingState:
+    timestamp: Optional[float]
+    valid: bool
+
+    range_m: Optional[float]
+    theta_deg: Optional[float]
+    theta_raw_deg: Optional[float]
+    theta_smooth_deg: Optional[float]
+
+    snr_db: Optional[float]
+    peak_velocity_mps: Optional[float]
+    abs_peak_velocity_mps: Optional[float]
+    peak_power_db: Optional[float]
+
+    beam_tx0_code: Optional[int]
+    beam_tx1_code: Optional[int]
+    beam_tx2_code: Optional[int]
+    beam_theta_deg: Optional[float]
+
+    target_range_bin: Optional[int]
+    target_doppler_bin: Optional[int]
+
+    confidence: float
+    reason: str
+    track_range_m: Optional[float] = None
+    track_velocity_mps: Optional[float] = None
+    candidate_count: int = 0
+    selected_score: Optional[float] = None
 
 
 @dataclass
@@ -355,6 +426,38 @@ class RadarAgent:
             frame_valid=False,
             reason="not_started",
         )
+        self._latest_tracking_state = RadarTrackingState(
+            timestamp=None,
+            valid=False,
+            range_m=None,
+            theta_deg=None,
+            theta_raw_deg=None,
+            theta_smooth_deg=None,
+            snr_db=None,
+            peak_velocity_mps=None,
+            abs_peak_velocity_mps=None,
+            peak_power_db=None,
+            beam_tx0_code=None,
+            beam_tx1_code=None,
+            beam_tx2_code=None,
+            beam_theta_deg=None,
+            target_range_bin=None,
+            target_doppler_bin=None,
+            confidence=0.0,
+            reason="not_started",
+            track_range_m=None,
+            track_velocity_mps=None,
+            candidate_count=0,
+            selected_score=None,
+        )
+        self._theta_smooth_deg: Optional[float] = None
+        self._last_tracking_debug_print = 0.0
+        self._track_range_m = None
+        self._track_velocity_mps = None
+        self._track_theta_deg = None
+        self._track_last_update_time = None
+        self._last_beam_update_time = 0.0
+        self._last_beam_codes: Optional[tuple[int, int, int]] = None
 
         # Optional background model.
         self._background_power: Optional[np.ndarray] = None
@@ -374,6 +477,13 @@ class RadarAgent:
 
         self._stop_event.clear()
         self._stats = RadarStats()
+        self._track_range_m = None
+        self._track_velocity_mps = None
+        self._track_theta_deg = None
+        self._track_last_update_time = None
+        self._theta_smooth_deg = None
+        self._last_beam_update_time = 0.0
+        self._last_beam_codes = None
 
         self._rx_thread = threading.Thread(
             target=self._receiver_worker,
@@ -757,6 +867,10 @@ class RadarAgent:
         with self._lock:
             return self._latest_summary
 
+    def get_latest_tracking_state(self) -> RadarTrackingState:
+        with self._lock:
+            return self._latest_tracking_state
+
     # -----------------------------
     # Debug-facing API
     # -----------------------------
@@ -947,6 +1061,10 @@ class RadarAgent:
 
                 self._latest_debug_frame = self._make_debug_frame_locked(radar_frame)
                 self._latest_summary = self._make_summary_from_frame_locked(radar_frame)
+                self._latest_tracking_state = self._estimate_tracking_state_from_frame_locked(radar_frame)
+                tracking_state = self._latest_tracking_state
+
+            self._maybe_print_tracking_debug(tracking_state)
 
         print("[RadarAgent] processor stopped")
 
@@ -956,7 +1074,7 @@ class RadarAgent:
 
     def _process_valid_frame(self, frame_id: int, timestamp: float, frame_bytes: bytes) -> RadarFrame:
         adc = self._raw_frame_to_adc(frame_bytes)
-        raw_rd_power = self._compute_range_doppler_power(adc)
+        raw_rd_power, rd_complex = self._compute_range_doppler(adc)
 
         with self._lock:
             if self._bg_collect_remaining > 0:
@@ -985,6 +1103,7 @@ class RadarAgent:
             rd_db=rd_db.astype(np.float32),
             range_axis_m=self.range_axis_m,
             velocity_axis_mps=self.velocity_axis_mps,
+            rd_complex=rd_complex.astype(np.complex64) if self.cfg.enable_rx_phase_aoa else None,
             valid=True,
         )
 
@@ -1011,7 +1130,7 @@ class RadarAgent:
 
         return adc.reshape(cfg.num_loops, cfg.num_tx, cfg.num_samples, cfg.num_rx)
 
-    def _compute_range_doppler_power(self, adc: np.ndarray) -> np.ndarray:
+    def _compute_range_doppler(self, adc: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         cfg = self.cfg
 
         # adc: [loop, tx, sample, rx]
@@ -1044,7 +1163,12 @@ class RadarAgent:
         rd_power = np.sum(np.abs(rd) ** 2, axis=(1, 3))  # [doppler, range]
         rd_power = rd_power.T  # [range, doppler]
 
-        return rd_power.astype(np.float64)
+        return rd_power.astype(np.float64), rd
+
+    def _compute_range_doppler_power(self, adc: np.ndarray) -> np.ndarray:
+        """Compatibility wrapper preserving the previous public/internal behavior."""
+        rd_power, _ = self._compute_range_doppler(adc)
+        return rd_power
 
     # ========================================================
     # Internal: axes / helpers
@@ -1190,6 +1314,412 @@ class RadarAgent:
             snr_db=snr_db,
             frame_valid=True,
             reason="latest_frame_summary",
+        )
+
+    def _invalid_tracking_state(
+        self,
+        timestamp: Optional[float],
+        reason: str,
+        range_m: Optional[float] = None,
+        snr_db: Optional[float] = None,
+        peak_velocity_mps: Optional[float] = None,
+        abs_peak_velocity_mps: Optional[float] = None,
+        peak_power_db: Optional[float] = None,
+        target_range_bin: Optional[int] = None,
+        target_doppler_bin: Optional[int] = None,
+        valid: bool = False,
+        candidate_count: int = 0,
+        selected_score: Optional[float] = None,
+    ) -> RadarTrackingState:
+        return RadarTrackingState(
+            timestamp=timestamp,
+            valid=valid,
+            range_m=range_m,
+            theta_deg=None,
+            theta_raw_deg=None,
+            theta_smooth_deg=self._theta_smooth_deg,
+            snr_db=snr_db,
+            peak_velocity_mps=peak_velocity_mps,
+            abs_peak_velocity_mps=abs_peak_velocity_mps,
+            peak_power_db=peak_power_db,
+            beam_tx0_code=None,
+            beam_tx1_code=None,
+            beam_tx2_code=None,
+            beam_theta_deg=None,
+            target_range_bin=target_range_bin,
+            target_doppler_bin=target_doppler_bin,
+            confidence=0.0,
+            reason=reason,
+            track_range_m=self._track_range_m,
+            track_velocity_mps=self._track_velocity_mps,
+            candidate_count=candidate_count,
+            selected_score=selected_score,
+        )
+
+    def _select_tracking_target_bin(
+        self,
+        frame: RadarFrame,
+    ) -> dict:
+        r_mask = (
+            (self.range_axis_m >= self.cfg.tracking_range_min_m)
+            & (self.range_axis_m <= self.cfg.tracking_range_max_m)
+        )
+        v_abs = np.abs(self.velocity_axis_mps)
+        v_mask = (
+            (v_abs >= self.cfg.tracking_min_abs_velocity_mps)
+            & (v_abs <= self.cfg.tracking_max_abs_velocity_mps)
+        )
+
+        r_idx = np.where(r_mask)[0]
+        v_idx = np.where(v_mask)[0]
+        if len(r_idx) == 0 or len(v_idx) == 0:
+            return {
+                "valid": False,
+                "reason": "empty_tracking_roi",
+                "candidate_count": 0,
+                "selected_score": None,
+            }
+
+        roi = frame.rd_power[np.ix_(r_idx, v_idx)]
+        vals = roi[np.isfinite(roi) & (roi > 0)]
+        if vals.size == 0:
+            return {
+                "valid": False,
+                "reason": "no_tracking_roi_power",
+                "candidate_count": 0,
+                "selected_score": None,
+            }
+
+        noise = float(np.median(vals)) + 1e-12
+        noise_floor_db = float(self._pow_to_db(noise))
+        candidates = []
+
+        for rr_local, vv_local in np.ndindex(roi.shape):
+            power = float(roi[rr_local, vv_local])
+            if not np.isfinite(power) or power <= 0.0:
+                continue
+
+            range_bin = int(r_idx[rr_local])
+            doppler_bin = int(v_idx[vv_local])
+            peak_power_db = float(frame.rd_db[range_bin, doppler_bin])
+            snr_db = peak_power_db - noise_floor_db
+            if snr_db < self.cfg.tracking_snr_min_db:
+                continue
+
+            range_m = float(self.range_axis_m[range_bin])
+            velocity_mps = float(self.velocity_axis_mps[doppler_bin])
+            candidates.append({
+                "range_bin": range_bin,
+                "doppler_bin": doppler_bin,
+                "range_m": range_m,
+                "velocity_mps": velocity_mps,
+                "abs_velocity_mps": abs(velocity_mps),
+                "peak_power_db": peak_power_db,
+                "noise_floor_db": noise_floor_db,
+                "snr_db": snr_db,
+                "score": snr_db,
+            })
+
+        if not candidates:
+            return {
+                "valid": False,
+                "reason": "no_tracking_candidate_above_snr",
+                "candidate_count": 0,
+                "selected_score": None,
+            }
+
+        strongest = max(candidates, key=lambda c: c["snr_db"])
+        now = time.perf_counter()
+        has_track = (
+            self.cfg.tracking_enable_temporal_lock
+            and self._track_range_m is not None
+            and self._track_velocity_mps is not None
+            and self._track_last_update_time is not None
+        )
+        track_lost = (
+            has_track
+            and now - float(self._track_last_update_time) > self.cfg.tracking_lost_timeout_s
+        )
+
+        if not has_track or track_lost or not self.cfg.tracking_enable_temporal_lock:
+            selected = dict(strongest)
+            selected["valid"] = True
+            selected["reason"] = "tracking_reacquired" if track_lost else "tracking_acquired"
+            selected["candidate_count"] = len(candidates)
+            selected["selected_score"] = selected["score"]
+            return selected
+
+        gated = []
+        for candidate in candidates:
+            dr = abs(candidate["range_m"] - float(self._track_range_m))
+            dv = abs(candidate["velocity_mps"] - float(self._track_velocity_mps))
+            if dr > self.cfg.tracking_range_gate_m or dv > self.cfg.tracking_velocity_gate_mps:
+                continue
+
+            score = (
+                self.cfg.tracking_score_snr_weight * candidate["snr_db"]
+                - self.cfg.tracking_score_range_weight * dr
+                - self.cfg.tracking_score_velocity_weight * dv
+            )
+            scored = dict(candidate)
+            scored["score"] = float(score)
+            gated.append(scored)
+
+        if not gated:
+            return {
+                "valid": False,
+                "reason": "tracking_candidate_out_of_gate",
+                "candidate_count": len(candidates),
+                "selected_score": None,
+            }
+
+        selected = max(gated, key=lambda c: c["score"])
+        selected["valid"] = True
+        selected["reason"] = "tracking_locked"
+        selected["candidate_count"] = len(candidates)
+        selected["selected_score"] = selected["score"]
+        return selected
+
+    def _estimate_aoa_from_frame_bin(
+        self,
+        frame: RadarFrame,
+        range_bin: int,
+        doppler_bin: int,
+    ) -> tuple[Optional[float], str]:
+        if frame.rd_complex is None:
+            return None, "rd_complex_missing"
+
+        rd_complex = frame.rd_complex
+        if rd_complex.ndim != 4:
+            return None, "rd_complex_bad_shape"
+        if rd_complex.shape[1] != 1:
+            return None, "unexpected_tx_dimension_for_3tx_simultaneous"
+        if not (0 <= doppler_bin < rd_complex.shape[0] and 0 <= range_bin < rd_complex.shape[2]):
+            return None, "target_bin_out_of_bounds"
+
+        rx_complex = rd_complex[doppler_bin, 0, range_bin, :]
+        if rx_complex.size < 4:
+            return None, "not_enough_rx_channels"
+        if not np.all(np.isfinite(rx_complex)):
+            return None, "rx_complex_not_finite"
+
+        mag = np.abs(rx_complex)
+        if not np.any(mag > 1e-9):
+            return None, "rx_complex_all_zero"
+
+        phase = np.unwrap(np.angle(rx_complex))
+        offsets = np.array(self.cfg.rx_phase_offsets_rad[: len(phase)], dtype=np.float64)
+        if offsets.size < phase.size:
+            offsets = np.pad(offsets, (0, phase.size - offsets.size), mode="constant")
+        phase = phase - offsets
+
+        x = np.arange(len(phase), dtype=np.float64)
+        slope = float(np.polyfit(x, phase, 1)[0])
+        sin_theta = float(np.clip(slope / np.pi, -1.0, 1.0))
+        theta_raw = float(np.degrees(np.arcsin(sin_theta)))
+        theta = (
+            self.cfg.aoa_sign * self.cfg.aoa_scale * theta_raw
+            + self.cfg.aoa_offset_deg
+        )
+        theta = float(np.clip(theta, -self.cfg.aoa_max_abs_deg, self.cfg.aoa_max_abs_deg))
+        return theta, "rx_phase_slope"
+
+    def _smooth_theta(self, theta_deg: float) -> float:
+        alpha = float(np.clip(self.cfg.aoa_alpha, 0.0, 1.0))
+        if self._theta_smooth_deg is None:
+            self._theta_smooth_deg = float(theta_deg)
+        else:
+            previous = float(self._theta_smooth_deg)
+            max_step = max(0.0, float(self.cfg.aoa_max_update_step_deg))
+            delta = float(np.clip(theta_deg - previous, -max_step, max_step))
+            theta_limited = previous + delta
+            self._theta_smooth_deg = float(alpha * theta_limited + (1.0 - alpha) * previous)
+        return self._theta_smooth_deg
+
+    def _phase_deg_to_code(self, deg: float) -> int:
+        return int(round((deg % 360.0) / self.cfg.phase_step_deg)) & 0x3F
+
+    def _theta_to_beam_codes(self, theta_deg: float) -> tuple[int, int, int]:
+        phi = -180.0 * math.sin(math.radians(theta_deg))
+        return (
+            self._phase_deg_to_code(0.0),
+            self._phase_deg_to_code(phi),
+            self._phase_deg_to_code(2.0 * phi),
+        )
+
+    def _atomic_write_text(self, path: str, text: str) -> None:
+        p = Path(path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        tmp = p.with_suffix(p.suffix + ".tmp")
+        tmp.write_text(text, encoding="ascii")
+        tmp.replace(p)
+
+    def _maybe_update_beam_from_tracking_locked(self, state: RadarTrackingState) -> None:
+        if not self.cfg.enable_aoa_feedback:
+            return
+        if not state.valid:
+            return
+        if state.theta_smooth_deg is None:
+            return
+        if state.confidence < self.cfg.beam_min_confidence:
+            return
+        if state.snr_db is None or state.snr_db < self.cfg.beam_min_snr_db:
+            return
+
+        codes = self._theta_to_beam_codes(float(state.theta_smooth_deg))
+        state.beam_tx0_code, state.beam_tx1_code, state.beam_tx2_code = codes
+        state.beam_theta_deg = float(state.theta_smooth_deg)
+
+        now = time.perf_counter()
+        if self._last_beam_codes == codes:
+            return
+        if now - self._last_beam_update_time < self.cfg.beam_update_interval_s:
+            return
+
+        text = f"{codes[0]},{codes[1]},{codes[2]}\n"
+        try:
+            self._atomic_write_text(self.cfg.beam_cmd_file, text)
+        except Exception as exc:
+            state.reason = f"{state.reason}; beam_write_failed:{type(exc).__name__}"
+            return
+
+        self._last_beam_codes = codes
+        self._last_beam_update_time = now
+
+    def _estimate_tracking_state_from_frame_locked(self, frame: RadarFrame) -> RadarTrackingState:
+        if not frame.valid or frame.rd_power.size == 0:
+            return self._invalid_tracking_state(
+                frame.timestamp,
+                frame.invalid_reason or "invalid_frame",
+            )
+
+        selected = self._select_tracking_target_bin(frame)
+        if not selected.get("valid", False):
+            return self._invalid_tracking_state(
+                frame.timestamp,
+                str(selected.get("reason", "no_tracking_target_in_roi")),
+                valid=False,
+                candidate_count=int(selected.get("candidate_count", 0) or 0),
+                selected_score=selected.get("selected_score", None),
+            )
+
+        range_bin = int(selected["range_bin"])
+        doppler_bin = int(selected["doppler_bin"])
+        peak_power_db = float(selected["peak_power_db"])
+        snr_db = float(selected["snr_db"])
+        range_m = float(selected["range_m"])
+        velocity_mps = float(selected["velocity_mps"])
+        abs_velocity_mps = float(selected["abs_velocity_mps"])
+        candidate_count = int(selected.get("candidate_count", 0) or 0)
+        selected_score = selected.get("selected_score", selected.get("score", None))
+
+        if snr_db < self.cfg.aoa_min_snr_db:
+            return self._invalid_tracking_state(
+                frame.timestamp,
+                "snr_below_aoa_min",
+                range_m=range_m,
+                snr_db=snr_db,
+                peak_velocity_mps=velocity_mps,
+                abs_peak_velocity_mps=abs_velocity_mps,
+                peak_power_db=peak_power_db,
+                target_range_bin=range_bin,
+                target_doppler_bin=doppler_bin,
+                valid=False,
+                candidate_count=candidate_count,
+                selected_score=selected_score,
+            )
+
+        theta_raw = None
+        theta_smooth = None
+        confidence = float(np.clip((snr_db - self.cfg.aoa_min_snr_db) / 20.0, 0.0, 1.0))
+        if not self.cfg.enable_rx_phase_aoa:
+            reason = "rx_phase_aoa_disabled"
+            confidence = 0.0
+        else:
+            theta_raw, reason = self._estimate_aoa_from_frame_bin(frame, range_bin, doppler_bin)
+            if theta_raw is not None:
+                if (
+                    self._track_theta_deg is not None
+                    and abs(theta_raw - float(self._track_theta_deg)) > self.cfg.tracking_theta_gate_deg
+                ):
+                    return self._invalid_tracking_state(
+                        frame.timestamp,
+                        "tracking_theta_out_of_gate",
+                        range_m=range_m,
+                        snr_db=snr_db,
+                        peak_velocity_mps=velocity_mps,
+                        abs_peak_velocity_mps=abs_velocity_mps,
+                        peak_power_db=peak_power_db,
+                        target_range_bin=range_bin,
+                        target_doppler_bin=doppler_bin,
+                        valid=False,
+                        candidate_count=candidate_count,
+                        selected_score=selected_score,
+                    )
+                theta_smooth = self._smooth_theta(theta_raw)
+                self._track_range_m = range_m
+                self._track_velocity_mps = velocity_mps
+                self._track_theta_deg = theta_smooth
+                self._track_last_update_time = time.perf_counter()
+            else:
+                confidence = 0.0
+
+        state = RadarTrackingState(
+            timestamp=frame.timestamp,
+            valid=theta_raw is not None,
+            range_m=range_m,
+            theta_deg=theta_smooth,
+            theta_raw_deg=theta_raw,
+            theta_smooth_deg=theta_smooth,
+            snr_db=snr_db,
+            peak_velocity_mps=velocity_mps,
+            abs_peak_velocity_mps=abs_velocity_mps,
+            peak_power_db=peak_power_db,
+            beam_tx0_code=None,
+            beam_tx1_code=None,
+            beam_tx2_code=None,
+            beam_theta_deg=None,
+            target_range_bin=range_bin,
+            target_doppler_bin=doppler_bin,
+            confidence=confidence,
+            reason=reason,
+            track_range_m=self._track_range_m,
+            track_velocity_mps=self._track_velocity_mps,
+            candidate_count=candidate_count,
+            selected_score=selected_score,
+        )
+        self._maybe_update_beam_from_tracking_locked(state)
+        return state
+
+    @staticmethod
+    def _fmt_tracking_value(value, precision: int = 2) -> str:
+        if value is None:
+            return "N/A"
+        try:
+            return f"{float(value):.{precision}f}"
+        except (TypeError, ValueError):
+            return str(value)
+
+    def _maybe_print_tracking_debug(self, state: RadarTrackingState) -> None:
+        now = time.perf_counter()
+        if now - self._last_tracking_debug_print < 1.0:
+            return
+        self._last_tracking_debug_print = now
+
+        print(
+            "[RadarTracking] "
+            f"valid={state.valid} "
+            f"range={self._fmt_tracking_value(state.range_m)} "
+            f"v={self._fmt_tracking_value(state.peak_velocity_mps)} "
+            f"snr={self._fmt_tracking_value(state.snr_db)} "
+            f"theta_raw={self._fmt_tracking_value(state.theta_raw_deg)} "
+            f"theta_smooth={self._fmt_tracking_value(state.theta_smooth_deg)} "
+            f"bins=({state.target_range_bin},{state.target_doppler_bin}) "
+            f"track_r={self._fmt_tracking_value(state.track_range_m)} "
+            f"track_v={self._fmt_tracking_value(state.track_velocity_mps)} "
+            f"cand={state.candidate_count} "
+            f"score={self._fmt_tracking_value(state.selected_score)} "
+            f"reason={state.reason}"
         )
 
     def _buffer_seconds_locked(self) -> float:
