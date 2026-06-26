@@ -5,9 +5,9 @@
 --   1. Initialize the beam command file polling function.
 --   2. Apply the initial beam command once before StartFrame.
 --   3. Start DCA1000 record to C:\temp\radar_back.bin.
---   4. Start radar frame.
---   5. Poll C:\temp\radarbox_beam_cmd.txt and update chirp0 Tx phase when it changes.
---   6. Stop radar frame when the loop exits normally or on a Lua error.
+--   4. Keep running and watch C:\temp\radarbox_radar_state.txt.
+--   5. When state is "active", start radar frame and poll beam commands.
+--   6. When state becomes "inactive", stop radar frame and wait for the next active state.
 --
 -- Command file format:
 --   0,0,0
@@ -18,7 +18,12 @@
 -- Graceful stop:
 --   Create this file while the script is running:
 --       C:\temp\radarbox_stop.txt
---   The script will stop frame and exit.
+--   The script will stop frame and exit the outer loop.
+--
+-- Game-controlled radar runtime state:
+--   C:\temp\radarbox_radar_state.txt
+--   active   -> StartFrame + beam polling loop
+--   inactive -> StopFrame + idle wait loop
 --
 -- Note:
 --   If mmWave Studio forcibly kills the script with a hard Abort button,
@@ -29,6 +34,7 @@
 ------------------------------------------------------------
 
 CMD_PATH = "C:\\temp\\radarbox_beam_cmd.txt"
+RADAR_STATE_PATH = "C:\\temp\\radarbox_radar_state.txt"
 STOP_PATH = "C:\\temp\\radarbox_stop.txt"
 APPLY_LOG_PATH = "C:\\temp\\radarbox_beam_apply_log.txt"
 ADC_OUTPUT_PATH = "C:\\temp\\radar_back.bin"
@@ -107,6 +113,14 @@ function remove_file(path)
     end
 end
 
+function read_radar_state()
+    local s = read_file(RADAR_STATE_PATH)
+    if s == nil or s == "" then
+        return "inactive"
+    end
+    return string.lower(trim(s))
+end
+
 function split_codes(s)
     local vals = {}
     for token in string.gmatch(s, "([^,]+)") do
@@ -177,8 +191,9 @@ function safe_stop_frame()
 end
 
 function main()
-    log_msg("RadarBox record + StartFrame + beam poll script started", "yellow")
+    log_msg("RadarBox record + state-controlled beam poll script started", "yellow")
     log_msg("CMD_PATH=" .. CMD_PATH, "yellow")
+    log_msg("RADAR_STATE_PATH=" .. RADAR_STATE_PATH, "yellow")
     log_msg("STOP_PATH=" .. STOP_PATH, "yellow")
     log_msg("APPLY_LOG_PATH=" .. APPLY_LOG_PATH, "yellow")
     log_msg("ADC_OUTPUT_PATH=" .. ADC_OUTPUT_PATH, "yellow")
@@ -194,30 +209,62 @@ function main()
     ar1.CaptureCardConfig_StartRecord(ADC_OUTPUT_PATH, 1)
     RSTD.Sleep(START_RECORD_TO_START_FRAME_SLEEP_MS)
 
-    log_msg("Start radar frame: ar1.StartFrame()", "yellow")
-    ar1.StartFrame()
-    frame_started = true
-    RSTD.Sleep(START_FRAME_TO_POLL_SLEEP_MS)
+    log_msg("Outer state loop entered; waiting for RADAR_STATE_PATH=active", "yellow")
 
-    log_msg("Beam polling loop entered", "yellow")
-
-    local iter = 0
     while true do
-        iter = iter + 1
-
         if file_exists(STOP_PATH) then
-            log_msg("STOP_PATH detected; exiting polling loop", "yellow")
+            log_msg("STOP_PATH detected; exiting outer loop", "yellow")
             break
         end
 
-        apply_cmd_if_changed(false)
+        local state = read_radar_state()
+        if state == "active" then
+            apply_cmd_if_changed(true)
 
-        if MAX_ITER ~= 0 and iter >= MAX_ITER then
-            log_msg("MAX_ITER reached; exiting polling loop", "yellow")
-            break
+            if not frame_started then
+                log_msg("RADAR_STATE active; Start radar frame: ar1.StartFrame()", "yellow")
+                ar1.StartFrame()
+                frame_started = true
+                RSTD.Sleep(START_FRAME_TO_POLL_SLEEP_MS)
+            end
+
+            log_msg("Beam polling loop entered", "yellow")
+
+            local iter = 0
+            while true do
+                iter = iter + 1
+
+                if file_exists(STOP_PATH) then
+                    log_msg("STOP_PATH detected inside polling loop", "yellow")
+                    safe_stop_frame()
+                    return
+                end
+
+                state = read_radar_state()
+                if state ~= "active" then
+                    log_msg("RADAR_STATE is " .. tostring(state) .. "; leaving beam polling loop", "yellow")
+                    safe_stop_frame()
+                    break
+                end
+
+                apply_cmd_if_changed(false)
+
+                if MAX_ITER ~= 0 and iter >= MAX_ITER then
+                    log_msg("MAX_ITER reached; stopping current active frame", "yellow")
+                    safe_stop_frame()
+                    break
+                end
+
+                RSTD.Sleep(POLL_MS)
+            end
+        else
+            if frame_started then
+                log_msg("RADAR_STATE inactive; stopping frame", "yellow")
+                safe_stop_frame()
+            end
+
+            RSTD.Sleep(POLL_MS)
         end
-
-        RSTD.Sleep(POLL_MS)
     end
 end
 
