@@ -509,6 +509,8 @@ class RadarBoxGameApp(ShowBase):
             self.radar_agent = None
 
     def _setup_ui(self):
+        self._setup_hp_bars()
+
         help_text = (
             "RadarBox Game System\n"
             "Keyboard: J/H/U right straight/hook/uppercut | F/G/T left straight/hook/uppercut\n"
@@ -519,6 +521,66 @@ class RadarBoxGameApp(ShowBase):
         self.hp_text = OnscreenText(text="", pos=(-1.32, -0.86), scale=0.056, align=TextNode.ALeft, fg=(1, 0.9, 0.25, 1), mayChange=True)
         self.action_text = OnscreenText(text="", pos=(-1.32, -0.95), scale=0.045, align=TextNode.ALeft, fg=(0.75, 0.95, 1.0, 1), mayChange=True)
         self.radar_text = OnscreenText(text="", pos=(0.38, 0.92), scale=0.038, align=TextNode.ALeft, fg=(0.45, 0.75, 1.0, 1), mayChange=True)
+
+        if not self.debug_enabled:
+            self.help_text.hide()
+            self.hp_text.hide()
+            self.action_text.hide()
+            self.radar_text.hide()
+
+    def _make_ui_card(self, name: str, frame: tuple[float, float, float, float], color: tuple[float, float, float, float], pos: tuple[float, float, float]):
+        cm = CardMaker(name)
+        cm.setFrame(*frame)
+        node = self.aspect2d.attachNewNode(cm.generate())
+        node.setPos(*pos)
+        node.setColor(*color)
+        node.setTransparency(TransparencyAttrib.MAlpha)
+        node.setBin("fixed", 8)
+        node.setDepthTest(False)
+        node.setDepthWrite(False)
+        return node
+
+    def _setup_hp_bars(self):
+        self.hp_bar_width = 0.58
+        self.hp_bar_height = 0.052
+        self.player_hp_bar_origin = (-1.30, 0.0, 0.84)
+        self.opponent_hp_bar_origin = (1.30, 0.0, 0.84)
+
+        w = self.hp_bar_width
+        h = self.hp_bar_height
+        bg = (0.08, 0.08, 0.08, 0.82)
+        damage = (0.55, 0.04, 0.04, 0.92)
+        player_fill = (0.10, 0.80, 0.32, 0.96)
+        opponent_fill = (0.94, 0.22, 0.18, 0.96)
+
+        self.player_hp_bg = self._make_ui_card("player_hp_bg", (0.0, w, 0.0, h), bg, self.player_hp_bar_origin)
+        self.player_hp_damage = self._make_ui_card("player_hp_damage", (0.0, w, 0.0, h), damage, self.player_hp_bar_origin)
+        self.player_hp_fill = self._make_ui_card("player_hp_fill", (0.0, w, 0.0, h), player_fill, self.player_hp_bar_origin)
+
+        self.opponent_hp_bg = self._make_ui_card("opponent_hp_bg", (-w, 0.0, 0.0, h), bg, self.opponent_hp_bar_origin)
+        self.opponent_hp_damage = self._make_ui_card("opponent_hp_damage", (-w, 0.0, 0.0, h), damage, self.opponent_hp_bar_origin)
+        self.opponent_hp_fill = self._make_ui_card("opponent_hp_fill", (-w, 0.0, 0.0, h), opponent_fill, self.opponent_hp_bar_origin)
+
+        self.player_hp_label = OnscreenText(
+            text="PLAYER 100",
+            pos=(self.player_hp_bar_origin[0], 0.91),
+            scale=0.048,
+            align=TextNode.ALeft,
+            fg=(1.0, 1.0, 1.0, 1.0),
+            mayChange=True,
+        )
+        self.opponent_hp_label = OnscreenText(
+            text="OPPONENT 100",
+            pos=(self.opponent_hp_bar_origin[0], 0.91),
+            scale=0.048,
+            align=TextNode.ARight,
+            fg=(1.0, 1.0, 1.0, 1.0),
+            mayChange=True,
+        )
+        for text_node in (self.player_hp_label, self.opponent_hp_label):
+            text_node.setBin("fixed", 12)
+            text_node.setDepthTest(False)
+            text_node.setDepthWrite(False)
 
     def _setup_start_overlay(self):
         self.start_overlay = self.aspect2d.attachNewNode("start_game_overlay")
@@ -551,7 +613,7 @@ class RadarBoxGameApp(ShowBase):
             mayChange=True,
         )
         self.overlay_hint_text = OnscreenText(
-            text="Keyboard debug: press J",
+            text="Keyboard debug: press J" if self.debug_enabled else "",
             parent=self.start_overlay,
             pos=(0.0, -0.14),
             scale=0.045,
@@ -674,6 +736,16 @@ class RadarBoxGameApp(ShowBase):
 
     def _update_ui(self):
         s = self.game_core.state
+        player_hp = int(clamp(float(s.player_hp), 0.0, 100.0))
+        opponent_hp = int(clamp(float(s.opponent_hp), 0.0, 100.0))
+        self.player_hp_fill.setScale(player_hp / 100.0, 1.0, 1.0)
+        self.opponent_hp_fill.setScale(opponent_hp / 100.0, 1.0, 1.0)
+        self.player_hp_label.setText(f"PLAYER {player_hp}")
+        self.opponent_hp_label.setText(f"OPPONENT {opponent_hp}")
+
+        if not self.debug_enabled:
+            return
+
         self.hp_text.setText(
             f"Player HP: {s.player_hp:3d}    Opponent HP: {s.opponent_hp:3d}    "
             f"Player Block: {'ON' if s.player_blocking else 'OFF'}    Opponent Block: {'ON' if s.opponent_blocking else 'OFF'}"
