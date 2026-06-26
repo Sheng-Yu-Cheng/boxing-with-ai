@@ -37,6 +37,14 @@ class RenderCommand:
     payload: dict
 
 
+@dataclass
+class PlayerDefenseState:
+    blocking: bool = False
+    guard_score: float = 0.0
+    left_guard_score: float = 0.0
+    right_guard_score: float = 0.0
+
+
 def event_from_fused(fused: Any) -> GameInputEvent:
     """
     Convert core.fusion_core.FusedPlayerEvent into GameInputEvent.

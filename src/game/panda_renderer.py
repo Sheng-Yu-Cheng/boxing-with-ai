@@ -33,7 +33,7 @@ from panda3d.core import (
     WindowProperties,
 )
 
-from .events import RenderCommand, keyboard_event
+from .events import PlayerDefenseState, RenderCommand, keyboard_event
 from .game_core import GameCore
 from .input_sources import KeyboardInputBuffer, build_fusion_input_source
 
@@ -180,6 +180,26 @@ class OpponentController:
         self.app.taskMgr.remove("opponent_return_idle")
         self.app.taskMgr.doMethodLater(duration, self._return_idle_task, "opponent_return_idle")
 
+    def play_attack(self, kind: str):
+        anim_key = {
+            "straight": "cross",
+            "hook": "hook",
+            "uppercut": "uppercut",
+        }.get(kind, "cross")
+        anim = self.anim.get(anim_key)
+        self.blocking = False
+        if anim is None:
+            self.play_idle()
+            return
+        self.actor.stop()
+        self.actor.play(anim)
+        try:
+            duration = float(self.actor.getDuration(anim))
+        except Exception:
+            duration = 0.8
+        self.app.taskMgr.remove("opponent_return_idle")
+        self.app.taskMgr.doMethodLater(duration, self._return_idle_task, "opponent_return_idle")
+
     def _return_idle_task(self, task):
         self.play_idle()
         return task.done
@@ -259,6 +279,35 @@ class PlayerHandsController:
 
     def set_blocking(self, enabled: bool):
         self.blocking = bool(enabled)
+
+    def _glove_guard_score(self, pos: Vec3) -> float:
+        # Camera-local first-person coordinates:
+        # x = left/right, y = forward, z = height relative to camera.
+        z_score = clamp((float(pos.z) - (float(self.args.hand_z) + 0.12)) / 0.45, 0.0, 1.0)
+        y_center = float(self.args.hand_y) + 0.10
+        y_score = 1.0 - clamp(abs(float(pos.y) - y_center) / 0.85, 0.0, 1.0)
+        x_score = 1.0 - clamp(abs(float(pos.x)) / 0.90, 0.0, 1.0)
+        return clamp(0.55 * z_score + 0.25 * y_score + 0.20 * x_score, 0.0, 1.0)
+
+    def get_defense_state(self) -> PlayerDefenseState:
+        if self.blocking:
+            return PlayerDefenseState(
+                blocking=True,
+                guard_score=1.0,
+                left_guard_score=1.0,
+                right_guard_score=1.0,
+            )
+
+        left_score = self._glove_guard_score(self.left_glove.getPos())
+        right_score = self._glove_guard_score(self.right_glove.getPos())
+        guard_score = max(left_score, right_score, 0.5 * (left_score + right_score))
+        threshold = float(getattr(self.args, "enemy_ai_guard_threshold", 0.60))
+        return PlayerDefenseState(
+            blocking=guard_score >= threshold,
+            guard_score=guard_score,
+            left_guard_score=left_score,
+            right_guard_score=right_score,
+        )
 
     def punch(self, hand: str, kind: str, intensity: float = 0.5):
         motion = self.right_motion if hand == "right" else self.left_motion
@@ -374,6 +423,15 @@ class RadarBoxGameApp(ShowBase):
         self.args = args
         self.clock = self.taskMgr.globalClock
         self.game_core = GameCore()
+        self.game_core.configure_enemy_ai(
+            enabled=bool(args.enemy_ai),
+            attack_min_s=args.enemy_ai_attack_min_s,
+            attack_max_s=args.enemy_ai_attack_max_s,
+            telegraph_s=args.enemy_ai_telegraph_s,
+            recover_s=args.enemy_ai_recover_s,
+            guard_chance=args.enemy_ai_guard_chance,
+            damage_scale=args.enemy_ai_damage_scale,
+        )
         self.keyboard = KeyboardInputBuffer()
         self.fusion_input = None
         self.vision_agent = None
@@ -713,6 +771,15 @@ class RadarBoxGameApp(ShowBase):
             self.opponent.play_idle()
         elif cmd.type == "opponent_reaction":
             self.opponent.play_reaction(str(cmd.payload.get("reaction", "light_hit")))
+        elif cmd.type == "opponent_attack":
+            self.opponent.play_attack(str(cmd.payload.get("kind", "straight")))
+        elif cmd.type == "player_damaged":
+            blocked = bool(cmd.payload.get("blocked", False))
+            damage = int(cmd.payload.get("damage", 0) or 0)
+            if blocked:
+                print(f"[EnemyAI] player blocked attack damage={damage}")
+            else:
+                print(f"[EnemyAI] player damaged={damage}")
 
     def _consume_events(self):
         events = self.keyboard.poll()
@@ -734,6 +801,14 @@ class RadarBoxGameApp(ShowBase):
             if self.round_state != "playing":
                 return
 
+    def _update_enemy_ai(self, dt: float):
+        if self.round_state != "playing":
+            return
+        defense_state = self.hands.get_defense_state()
+        for cmd in self.game_core.update_enemy_ai(dt, defense_state):
+            self.apply_command(cmd)
+        self._check_round_over()
+
     def _update_ui(self):
         s = self.game_core.state
         player_hp = int(clamp(float(s.player_hp), 0.0, 100.0))
@@ -750,7 +825,13 @@ class RadarBoxGameApp(ShowBase):
             f"Player HP: {s.player_hp:3d}    Opponent HP: {s.opponent_hp:3d}    "
             f"Player Block: {'ON' if s.player_blocking else 'OFF'}    Opponent Block: {'ON' if s.opponent_blocking else 'OFF'}"
         )
-        self.action_text.setText(f"Action: {s.last_action}    Source: {s.last_source}")
+        ai = self.game_core.enemy_ai_state
+        defense = self.hands.get_defense_state()
+        self.action_text.setText(
+            f"Action: {s.last_action}    Source: {s.last_source}    "
+            f"EnemyAI: {ai.phase}/{ai.current_attack} t={ai.timer_s:.2f}    "
+            f"Guard: {defense.guard_score:.2f}"
+        )
 
     def _update_player_marker_from_range(self, range_m) -> None:
         if range_m is None:
@@ -945,6 +1026,7 @@ class RadarBoxGameApp(ShowBase):
             self.hands.update_from_pose_state(pose_state, dt, radar_range_m=self.latest_radar_range_for_pose_m)
         else:
             self.hands.update(dt)
+        self._update_enemy_ai(dt)
         self._update_ui()
         self.update_radar_ui()
         self._update_debug_windows()
@@ -1035,6 +1117,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="allow straight punches to fall back to camera-only damage when radar is enabled",
     )
+    enemy_ai = parser.add_mutually_exclusive_group()
+    enemy_ai.add_argument("--enemy-ai", dest="enemy_ai", action="store_true")
+    enemy_ai.add_argument("--no-enemy-ai", dest="enemy_ai", action="store_false")
+    parser.set_defaults(enemy_ai=True)
+    parser.add_argument("--enemy-ai-attack-min-s", type=float, default=0.8)
+    parser.add_argument("--enemy-ai-attack-max-s", type=float, default=1.6)
+    parser.add_argument("--enemy-ai-telegraph-s", type=float, default=0.45)
+    parser.add_argument("--enemy-ai-recover-s", type=float, default=0.85)
+    parser.add_argument("--enemy-ai-guard-chance", type=float, default=0.30)
+    parser.add_argument("--enemy-ai-damage-scale", type=float, default=1.0)
+    parser.add_argument("--enemy-ai-guard-threshold", type=float, default=0.60)
     parser.add_argument("--fusion-verbose", action="store_true")
     parser.add_argument("--width", type=int, default=1280)
     parser.add_argument("--height", type=int, default=720)

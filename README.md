@@ -28,20 +28,28 @@ python .\scripts\game\run_game.py `
     --enable-aoa-feedback `
     --pose-model .\models\pose_landmarker_lite.task `
     --classifier .\models\punch_classifier.joblib `
-    --confidence-threshold 0.40 `
+    --confidence-threshold 0.55 `
     --beam-cmd-file C:\temp\radarbox_beam_cmd.txt `
     --pose-scale-x 0.75 `
     --pose-hand-spacing 0.10 `
     --pose-use-radar-range-x `
     --pose-x-reference-range-m 2.0 `
     --pose-x-range-gain-min 0.65 `
-    --pose-x-range-gain-max 1.6
+    --pose-x-range-gain-max 1.6 `
+    --enemy-ai `
+    --enemy-ai-attack-min-s 0.8 `
+    --enemy-ai-attack-max-s 1.6 `
+    --enemy-ai-telegraph-s 0.45 `
+    --enemy-ai-recover-s 0.85 `
+    --enemy-ai-guard-chance 0.30 `
+    --enemy-ai-damage-scale 1.0 `
+    --enemy-ai-guard-threshold 0.60
 ```
 
 TBD:
 1. restart game v
 2. enemy AI 
-3. 血條，不用數字
+3. 血條，不用數字 v
 3. frame lua, stop frame with command from python with file exchange v
 4. retrain classifier
 5. no-debug mode v
