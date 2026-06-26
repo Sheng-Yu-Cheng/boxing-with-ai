@@ -7,9 +7,9 @@ Manual MediaPipe trajectory recorder for RadarBox.
 Recommended data collection:
 
     python .\scripts\vision\record_punch_dataset.py --label right_straight --hand right --count 50
-    python .\scripts\vision\record_punch_dataset.py --label right_hook     --hand right --count 50
-    python .\scripts\vision\record_punch_dataset.py --label right_uppercut --hand right --count 50
-    python .\scripts\vision\record_punch_dataset.py --label negative      --hand right --count 50
+    python .\scripts\vision\record_punch_dataset.py --label right_hook     --hand right --count 30
+    python .\scripts\vision\record_punch_dataset.py --label right_uppercut --hand right --count 30
+    python .\scripts\vision\record_punch_dataset.py --label negative      --hand right --count 30
 
 How to record:
     - A webcam window opens.
@@ -81,7 +81,7 @@ def main() -> None:
     parser.add_argument("--height", type=int, default=480)
     parser.add_argument("--fps", type=int, default=30)
     parser.add_argument("--record-seconds", type=float, default=1.10)
-    parser.add_argument("--countdown", type=float, default=0.60)
+    parser.add_argument("--countdown", type=float, default=1.20)
     mirror = parser.add_mutually_exclusive_group()
     mirror.add_argument("--mirror-input", dest="mirror_input", action="store_true")
     mirror.add_argument("--no-mirror-input", dest="mirror_input", action="store_false")
