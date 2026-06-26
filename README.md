@@ -19,3 +19,10 @@ python .\scripts\game\run_game.py `
     --pose-x-range-gain-min 0.65 `
     --pose-x-range-gain-max 1.6
 ```
+
+TBD:
+1. restart game
+2. enemy AI
+3. frame lua, stop frame with command from python with file exchange
+4. retrain classifier
+5. no-debug mode
