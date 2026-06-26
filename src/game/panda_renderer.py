@@ -323,31 +323,21 @@ class PlayerHandsController:
             )
 
         alpha = max(0.0, min(1.0, float(self.args.pose_smoothing_alpha)))
+        # VisionAgent mirrors camera input by default for natural display/training.
+        # MediaPipe's landmark labels then arrive swapped relative to the user's
+        # physical hands, so swap only the continuous visual pose stream here.
+        right_pose_hand = pose_state.left_hand if self.args.mirror_input else pose_state.right_hand
+        left_pose_hand = pose_state.right_hand if self.args.mirror_input else pose_state.left_hand
         right_target = target_for_hand(
-            pose_state.right_hand,
+            right_pose_hand,
             self.idle_right_pos,
             self.args.pose_hand_spacing,
         )
         left_target = target_for_hand(
-            pose_state.left_hand,
+            left_pose_hand,
             self.idle_left_pos,
             -self.args.pose_hand_spacing,
         )
-
-        if pose_state.pose_detected and pose_state.right_hand.detected and pose_state.left_hand.detected:
-            right_x = float(right_target.x)
-            left_x = float(left_target.x)
-            center_x = 0.5 * (right_x + left_x)
-            dx = right_x - left_x
-            if dx <= 0.0:
-                dx = float(self.args.pose_glove_min_dx)
-            dx = clamp(
-                dx,
-                float(self.args.pose_glove_min_dx),
-                float(self.args.pose_glove_max_dx),
-            )
-            right_target = Vec3(center_x + 0.5 * dx, right_target.y, right_target.z)
-            left_target = Vec3(center_x - 0.5 * dx, left_target.y, left_target.z)
 
         self._smooth_set_pos(self.right_glove, right_target, alpha)
         self._smooth_set_pos(self.left_glove, left_target, alpha)
