@@ -28,7 +28,7 @@ python .\scripts\game\run_game.py `
     --enable-aoa-feedback `
     --pose-model .\models\pose_landmarker_lite.task `
     --classifier .\models\punch_classifier.joblib `
-    --confidence-threshold 0.55 `
+    --confidence-threshold 0.40 `
     --beam-cmd-file C:\temp\radarbox_beam_cmd.txt `
     --pose-scale-x 0.75 `
     --pose-hand-spacing 0.10 `
