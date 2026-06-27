@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import atexit
+import json
 import math
 import sys
 import time
@@ -67,6 +68,8 @@ RADAR_RANGE_MAX_M = 2.5
 RADAR_MARKER_Y_MIN = 0.5
 RADAR_MARKER_Y_MAX = 3.0
 RADAR_STATE_PATH = r"C:\temp\radarbox_radar_state.txt"
+LEADERBOARD_PATH = "data/game_leaderboard.json"
+LEADERBOARD_LIMIT = 5
 
 
 def resolve_path(path_str: str, must_exist: bool = True) -> str:
@@ -459,6 +462,9 @@ class RadarBoxGameApp(ShowBase):
         self.latest_radar_range_for_pose_m = None
         self.round_state = "waiting_start"
         self.round_result_message = ""
+        self.round_start_time = None
+        self.leaderboard_path = Path(LEADERBOARD_PATH)
+        self.leaderboard = self._load_leaderboard()
         self.scene_path = resolve_path(args.scene)
         self.opponent_path = resolve_path(args.opponent)
         self.glove_path = resolve_path(args.glove)
@@ -494,6 +500,60 @@ class RadarBoxGameApp(ShowBase):
             print(f"[Game] radar runtime state -> {state} ({path})")
         except Exception as exc:
             print(f"[Game] failed to write radar runtime state={state}: {type(exc).__name__}: {exc}")
+
+    def _load_leaderboard(self) -> list[dict]:
+        path = Path(LEADERBOARD_PATH)
+        if not path.exists():
+            return []
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(data, list):
+                return []
+            entries = []
+            for item in data:
+                if isinstance(item, dict):
+                    seconds = float(item.get("seconds"))
+                    created_unix = float(item.get("created_unix", 0.0) or 0.0)
+                else:
+                    seconds = float(item)
+                    created_unix = 0.0
+                entries.append({"seconds": seconds, "created_unix": created_unix})
+            return sorted(entries, key=lambda x: x["seconds"])[:LEADERBOARD_LIMIT]
+        except Exception as exc:
+            print(f"[Leaderboard] failed to load {path}: {type(exc).__name__}: {exc}")
+            return []
+
+    def _save_leaderboard(self) -> None:
+        try:
+            self.leaderboard_path.parent.mkdir(parents=True, exist_ok=True)
+            self.leaderboard_path.write_text(
+                json.dumps(self.leaderboard[:LEADERBOARD_LIMIT], indent=2, ensure_ascii=False),
+                encoding="utf-8",
+            )
+        except Exception as exc:
+            print(f"[Leaderboard] failed to save {self.leaderboard_path}: {type(exc).__name__}: {exc}")
+
+    def _leaderboard_qualifies(self, seconds: float) -> bool:
+        return len(self.leaderboard) < LEADERBOARD_LIMIT or float(seconds) < float(self.leaderboard[-1]["seconds"])
+
+    def _add_leaderboard_score(self, seconds: float) -> None:
+        self.leaderboard.append({"seconds": float(seconds), "created_unix": time.time()})
+        self.leaderboard = sorted(self.leaderboard, key=lambda x: x["seconds"])[:LEADERBOARD_LIMIT]
+        self._save_leaderboard()
+        print(f"[Leaderboard] saved score seconds={seconds:.2f}")
+
+    def _leaderboard_text(self) -> str:
+        lines = ["Top 5 Fastest KOs"]
+        if not self.leaderboard:
+            lines.append("1. ---")
+        else:
+            for i, entry in enumerate(self.leaderboard[:LEADERBOARD_LIMIT], start=1):
+                lines.append(f"{i}. {float(entry['seconds']):.2f}s")
+        return "\n".join(lines)
+
+    def _update_overlay_leaderboard_text(self) -> None:
+        if hasattr(self, "overlay_leaderboard_text"):
+            self.overlay_leaderboard_text.setText(self._leaderboard_text())
 
     def _setup_camera(self):
         self.camera.setPos(0, self.args.camera_y, self.args.camera_z)
@@ -679,7 +739,22 @@ class RadarBoxGameApp(ShowBase):
             fg=(0.78, 0.90, 1.0, 1.0),
             mayChange=True,
         )
-        for text_node in (self.overlay_result_text, self.overlay_start_text, self.overlay_hint_text):
+        self.overlay_leaderboard_text = OnscreenText(
+            text=self._leaderboard_text(),
+            parent=self.start_overlay,
+            pos=(0.0, -0.34),
+            scale=0.050,
+            align=TextNode.ACenter,
+            fg=(1.0, 0.96, 0.75, 1.0),
+            mayChange=True,
+        )
+
+        for text_node in (
+            self.overlay_result_text,
+            self.overlay_start_text,
+            self.overlay_hint_text,
+            self.overlay_leaderboard_text,
+        ):
             text_node.setBin("fixed", 30)
             text_node.setDepthTest(False)
             text_node.setDepthWrite(False)
@@ -688,6 +763,7 @@ class RadarBoxGameApp(ShowBase):
         self.round_state = "waiting_start"
         self.round_result_message = result_message
         self.overlay_result_text.setText(result_message)
+        self._update_overlay_leaderboard_text()
         self.start_overlay.show()
 
     def _hide_start_overlay(self):
@@ -732,12 +808,19 @@ class RadarBoxGameApp(ShowBase):
 
     def _start_round(self):
         self.reset_game()
+        self.round_start_time = time.perf_counter()
         self._hide_start_overlay()
         print("[Game] round started")
 
-    def _end_round(self, result_message: str):
+    def _end_round(self, result_message: str, elapsed_s: float | None = None):
+        self.round_start_time = None
         self.reset_game()
-        self._show_start_overlay(result_message)
+        if result_message == "You Win" and elapsed_s is not None and self._leaderboard_qualifies(elapsed_s):
+            self._add_leaderboard_score(elapsed_s)
+        display_message = result_message
+        if result_message == "You Win" and elapsed_s is not None:
+            display_message = f"{result_message}  {elapsed_s:.2f}s"
+        self._show_start_overlay(display_message)
         print(f"[Game] round ended: {result_message}")
 
     def _check_round_over(self):
@@ -745,7 +828,10 @@ class RadarBoxGameApp(ShowBase):
             return
         s = self.game_core.state
         if s.opponent_hp <= 0:
-            self._end_round("You Win")
+            elapsed = 0.0
+            if self.round_start_time is not None:
+                elapsed = max(0.0, time.perf_counter() - float(self.round_start_time))
+            self._end_round("You Win", elapsed)
         elif s.player_hp <= 0:
             self._end_round("You Have Been Defeated")
 
